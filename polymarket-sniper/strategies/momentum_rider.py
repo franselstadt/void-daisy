@@ -12,7 +12,7 @@ class MomentumRiderStrategy(BaseStrategy):
 
     name = "MOMENTUM_RIDER"
 
-    async def evaluate(self, event: dict[str, Any]) -> dict[str, Any] | None:
+    async def evaluate(self, event: dict[str, Any], relax_threshold: bool = False) -> dict[str, Any] | None:
         yes_price = float(event.get("yes_price", 0.0))
         if not 0.35 <= yes_price <= 0.65:
             return None
@@ -51,9 +51,11 @@ class MomentumRiderStrategy(BaseStrategy):
         signals += int(float(tick.get("volume_ratio_10_60", 1.0)) > 1.2)
         signals += int(float(event.get("lag_score", 0.0)) > 0.04)
 
-        if signals < 5:
+        min_signals = 4 if relax_threshold else 5
+        min_conf = 0.58 if relax_threshold else 0.68
+        if signals < min_signals:
             return None
-        if float(composed["confidence"]) < 0.68:
+        if float(composed["confidence"]) < min_conf:
             return None
         if int(event.get("seconds_remaining", 0)) < 150:
             return None

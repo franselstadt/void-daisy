@@ -12,7 +12,7 @@ class MeanReversionStrategy(BaseStrategy):
 
     name = "MEAN_REVERSION"
 
-    async def evaluate(self, event: dict[str, Any]) -> dict[str, Any] | None:
+    async def evaluate(self, event: dict[str, Any], relax_threshold: bool = False) -> dict[str, Any] | None:
         yes_price = float(event.get("yes_price", 0.0))
         if not ((0.17 <= yes_price <= 0.35) or (0.65 <= yes_price <= 0.83)):
             return None
@@ -41,11 +41,13 @@ class MeanReversionStrategy(BaseStrategy):
             "cross_asset_divergence": abs(float(event.get("lag_score", 0.0))),
         }
         composed = self.composer.compose(self.name, context)
-        if float(composed["confidence"]) < 0.60:
+        min_conf = 0.55 if relax_threshold else 0.60
+        if float(composed["confidence"]) < min_conf:
             return None
         if float(event.get("spread", 1.0)) > 0.04:
             return None
-        if int(event.get("seconds_remaining", 0)) < 150:
+        min_secs = 130 if relax_threshold else 150
+        if int(event.get("seconds_remaining", 0)) < min_secs:
             return None
 
         entry_price = float(event.get("yes_price", 0.5) if direction == "UP" else event.get("no_price", 0.5))

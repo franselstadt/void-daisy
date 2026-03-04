@@ -12,7 +12,7 @@ class OracleArbStrategy(BaseStrategy):
 
     name = "ORACLE_ARB"
 
-    async def evaluate(self, event: dict[str, Any]) -> dict[str, Any] | None:
+    async def evaluate(self, event: dict[str, Any], relax_threshold: bool = False) -> dict[str, Any] | None:
         if event.get("type") != "ORACLE_LAG_DETECTED":
             return None
         lag = float(event.get("lag_seconds", 0.0))

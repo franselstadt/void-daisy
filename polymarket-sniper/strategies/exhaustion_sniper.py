@@ -12,7 +12,7 @@ class ExhaustionSniperStrategy(BaseStrategy):
 
     name = "EXHAUSTION_SNIPER"
 
-    async def evaluate(self, event: dict[str, Any]) -> dict[str, Any] | None:
+    async def evaluate(self, event: dict[str, Any], relax_threshold: bool = False) -> dict[str, Any] | None:
         yes_price = float(event.get("yes_price", 0.0))
         no_price = float(event.get("no_price", 0.0))
         direction = "UP" if 0.04 <= yes_price <= 0.16 else "DOWN" if 0.04 <= no_price <= 0.16 else ""
@@ -44,13 +44,15 @@ class ExhaustionSniperStrategy(BaseStrategy):
         entry_price = yes_price if direction == "UP" else no_price
         seconds_remaining = int(event.get("seconds_remaining", 0))
 
-        if composed["exhaustion_score"] < 3.5:
+        min_exhaustion = 3.5 * (0.85 if relax_threshold else 1.0)
+        min_conf = 0.62 * (0.85 if relax_threshold else 1.0)
+        if composed["exhaustion_score"] < min_exhaustion:
             return None
         if float(event.get("spread", 1.0)) > 0.05:
             return None
         if not 100 <= seconds_remaining <= 270:
             return None
-        if float(composed["confidence"]) < 0.62:
+        if float(composed["confidence"]) < min_conf:
             return None
 
         return {

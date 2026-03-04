@@ -50,6 +50,17 @@ class AppState:
             "correlation_lag": {"ETH": 8.0, "SOL": 12.0, "XRP": 15.0},
             "bayesian_beliefs": {},
             "thought_train": {"history": [], "last_result": None},
+            "coverage": {
+                "last_attempt": {"BTC": 0.0, "ETH": 0.0, "SOL": 0.0, "XRP": 0.0},
+                "misses": {"BTC": 0, "ETH": 0, "SOL": 0, "XRP": 0},
+                "window_stats": {
+                    "BTC": {"total": 0, "covered": 0, "current_market_id": ""},
+                    "ETH": {"total": 0, "covered": 0, "current_market_id": ""},
+                    "SOL": {"total": 0, "covered": 0, "current_market_id": ""},
+                    "XRP": {"total": 0, "covered": 0, "current_market_id": ""},
+                },
+                "threshold_relax": {},
+            },
         }
 
     async def get(self, *keys: str, default: Any = None) -> Any:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -31,11 +32,18 @@ class TelegramReporter:
 
     async def _status_text(self) -> str:
         snap = await self.state.snapshot()
+        coverage = snap.get("coverage", {}).get("last_attempt", {})
+        tags = []
+        for asset in ["BTC", "ETH", "SOL", "XRP"]:
+            last = float(coverage.get(asset, 0.0))
+            gap_minutes = (time.time() - last) / 60 if last > 0 else 999
+            tags.append(f"{asset} {'✅' if gap_minutes <= 6 else f'⚠️({gap_minutes:.1f}m)'}")
         return (
             f"Mode: {snap.get('degradation_level', 0)}\n"
             f"Bankroll: ${snap.get('bankroll', 0.0):.2f}\n"
             f"Open positions: {len(snap.get('open_positions', {}))}\n"
             f"Regime: {snap.get('bot', {}).get('current_regime', 'RANGING')}\n"
+            f"Coverage: {' | '.join(tags)}\n"
             f"Paused: {snap.get('bot', {}).get('paused', False)}"
         )
 
@@ -158,6 +166,12 @@ class TelegramReporter:
     async def on_thought_train(self, event: dict[str, Any]) -> None:
         await self.send_message(f"Thought train complete: {event.get('loss_pattern')} changes={event.get('changes_made')}")
 
+    async def on_coverage_alert(self, event: dict[str, Any]) -> None:
+        await self.send_message(f"⚠️ Coverage alert: {event.get('asset')} gap {event.get('gap_minutes')}m (miss {event.get('misses')})")
+
+    async def on_coverage_failure(self, event: dict[str, Any]) -> None:
+        await self.send_message(f"🚨 Coverage failure: {event.get('asset')} {event.get('gap_minutes')}m reasons={event.get('reasons')}")
+
     async def run(self) -> None:
         """Start command handlers and keep bot running."""
         bus.subscribe("TRADE_EXITED", self.on_trade_exited)
@@ -165,6 +179,8 @@ class TelegramReporter:
         bus.subscribe("REGIME_CHANGED", self.on_regime_change)
         bus.subscribe("WEIGHTS_UPDATED", self.on_weights_updated)
         bus.subscribe("THOUGHT_TRAIN_COMPLETED", self.on_thought_train)
+        bus.subscribe("COVERAGE_ALERT", self.on_coverage_alert)
+        bus.subscribe("COVERAGE_FAILURE", self.on_coverage_failure)
         if not self.enabled or not self.app:
             while True:
                 await asyncio.sleep(3600)

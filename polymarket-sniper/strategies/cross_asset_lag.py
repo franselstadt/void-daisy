@@ -25,7 +25,7 @@ class CrossAssetLagStrategy(BaseStrategy):
         self._btc_move_ts = float(event.get("timestamp", time.time()))
         self._btc_direction = "UP" if float(event.get("velocity_60s", 0.0)) >= 0 else "DOWN"
 
-    async def evaluate(self, event: dict[str, Any]) -> dict[str, Any] | None:
+    async def evaluate(self, event: dict[str, Any], relax_threshold: bool = False) -> dict[str, Any] | None:
         asset = str(event.get("asset", ""))
         if asset not in {"ETH", "SOL", "XRP"} or self._btc_move_ts <= 0:
             return None
@@ -40,7 +40,8 @@ class CrossAssetLagStrategy(BaseStrategy):
             self._btc_direction == "DOWN" and float(tick.get("velocity_30s", 0.0)) >= 0
         ):
             return None
-        if float(event.get("lag_score", 0.0)) <= 0.05:
+        min_lag = 0.04 if relax_threshold else 0.05
+        if float(event.get("lag_score", 0.0)) <= min_lag:
             return None
         if int(event.get("seconds_remaining", 0)) < 80:
             return None
@@ -63,7 +64,8 @@ class CrossAssetLagStrategy(BaseStrategy):
             "cross_asset_divergence": event.get("lag_score", 0.0),
         }
         composed = self.composer.compose(self.name, context)
-        if float(composed["confidence"]) < 0.65:
+        min_conf = 0.58 if relax_threshold else 0.65
+        if float(composed["confidence"]) < min_conf:
             return None
 
         return {

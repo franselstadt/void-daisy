@@ -26,10 +26,11 @@ from regime.detector import RegimeDetector
 from reporting.metrics import Metrics
 from reporting.telegram import TelegramReporter
 from risk.degrader import Degrader
-from risk.monitor import RiskMonitor
+from risk.monitor import CoverageMonitor, RiskMonitor
 from signals.correlation import CorrelationEngine
 from signals.exhaustion import ExhaustionScorer
 from strategies.engine_manager import EngineManager
+from strategies.window_scheduler import WindowScheduler
 from trading.executor import TradeExecutor
 from trading.guardian import TradeGuardian
 from trading.position_manager import PositionManager
@@ -69,6 +70,14 @@ async def _hourly_report_loop(state: AppState, reporter: TelegramReporter, metri
         lines.append(f"\nBankroll: ${bankroll:.2f} ({perf:+.1%})")
         lines.append(f"Win Rate: {float(snap.get('win_rate_10', 0.5)):.1%} | Mode: {snap.get('degradation_level', 0)}")
         lines.append(f"Regime: {snap.get('bot', {}).get('current_regime', 'RANGING')}")
+        coverage = snap.get("coverage", {}).get("window_stats", {})
+        if coverage:
+            cov_line = []
+            for a in ["BTC", "ETH", "SOL", "XRP"]:
+                row = coverage.get(a, {"covered": 0, "total": 0})
+                pct = (float(row.get("covered", 0)) / max(1, float(row.get("total", 0)))) * 100
+                cov_line.append(f"{a} {pct:.0f}%")
+            lines.append(f"Window coverage: {' | '.join(cov_line)}")
         await reporter.send_message("\n".join(lines))
 
 
@@ -115,6 +124,8 @@ async def main() -> None:
     beliefs = BayesianUpdater(state)
     thought_train = ThoughtTrain(state, config, trade_logger)
     risk_monitor = RiskMonitor(state, degrader)
+    coverage_monitor = CoverageMonitor(state)
+    window_scheduler = WindowScheduler(state, engine_manager)
 
     async def on_opportunity(opportunity: dict[str, Any]) -> None:
         bot = await state.get("bot", default={})
@@ -155,10 +166,15 @@ async def main() -> None:
         if not allowed:
             stats = await state.get("stats", default={})
             stats["opportunities_blocked"] = int(stats.get("opportunities_blocked", 0)) + 1
+            blocks = stats.setdefault("guardian_blocks", {}).setdefault(str(chosen.get("asset", "UNK")), [])
+            blocks.append(reason)
+            stats["guardian_blocks"][str(chosen.get("asset", "UNK"))] = blocks[-20:]
             await state.set("stats", value=stats)
             await bus.publish("TRADE_BLOCKED", {"asset": chosen.get("asset"), "reason": reason, "strategy": strategy})
             return
 
+        await coverage_monitor.record_attempt(str(chosen.get("asset", "BTC")))
+        await window_scheduler.record_attempt(str(chosen.get("asset", "BTC")))
         result = await executor.enter_trade(chosen, chosen["bet_size"])
         if not result.success:
             logger.warning("entry_failed", strategy=strategy, error=result.error)
@@ -186,6 +202,7 @@ async def main() -> None:
         await trade_logger.log_thought_train(event)
 
     bus.subscribe("OPPORTUNITY_DETECTED", on_opportunity)
+    bus.subscribe("SCHEDULED_OPPORTUNITY", on_opportunity)
     bus.subscribe("TRADE_EXIT_REQUEST", on_trade_exit_request)
     bus.subscribe("TRADE_EXITED", on_trade_exited)
     bus.subscribe("THOUGHT_TRAIN_COMPLETED", on_thought_train_complete)
@@ -201,7 +218,9 @@ async def main() -> None:
         beliefs.run(),
         thought_train.run(),
         risk_monitor.run(),
+        coverage_monitor.run(),
         reporter.run(),
+        window_scheduler.run(),
         profit_taker.run(),
         position_manager.run(),
         correlation_engine.run(),

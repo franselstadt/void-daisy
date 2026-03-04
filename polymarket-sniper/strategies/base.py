@@ -19,5 +19,5 @@ class BaseStrategy(ABC):
         self.composer = composer
 
     @abstractmethod
-    async def evaluate(self, event: dict[str, Any]) -> dict[str, Any] | None:
+    async def evaluate(self, event: dict[str, Any], relax_threshold: bool = False) -> dict[str, Any] | None:
         """Return opportunity payload when strategy conditions pass."""
