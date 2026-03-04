@@ -1,0 +1,66 @@
+{
+  "assets": {
+    "BTC": {
+      "entry_range": [0.08, 0.13],
+      "is_anchor": true,
+      "min_confidence": 0.65,
+      "volatility_mult": 1.0
+    },
+    "ETH": {
+      "correlation_leader": "BTC",
+      "entry_range": [0.07, 0.13],
+      "initial_lag_seconds": 8,
+      "min_confidence": 0.62,
+      "volatility_mult": 1.1
+    },
+    "SOL": {
+      "correlation_leader": "BTC",
+      "entry_range": [0.06, 0.14],
+      "initial_lag_seconds": 12,
+      "min_confidence": 0.7,
+      "volatility_mult": 1.2
+    },
+    "XRP": {
+      "entry_range": [0.07, 0.13],
+      "min_confidence": 0.68,
+      "news_blackout": true,
+      "volatility_mult": 0.85
+    }
+  },
+  "learning": {
+    "backtest_window": 100,
+    "min_trades": 15,
+    "update_interval": 300
+  },
+  "risk": {
+    "drawdown_defensive": 0.15,
+    "drawdown_reduced": 0.1,
+    "drawdown_survival": 0.18
+  },
+  "sizing": {
+    "confidence_multipliers": {
+      "base": 1.0,
+      "high": 1.4,
+      "low": 0.75,
+      "mid": 1.2
+    },
+    "kelly": 0.5,
+    "performance_multipliers": {
+      "bad": 0.45,
+      "good": 1.0,
+      "great": 1.25,
+      "neutral": 0.7
+    }
+  },
+  "trading": {
+    "max_bankroll_pct": 0.15,
+    "max_positions": 2,
+    "max_seconds": 270,
+    "max_spread": 0.04,
+    "min_bet": 1.0,
+    "min_edge_pct": 0.15,
+    "min_exhaustion": 3.5,
+    "min_seconds": 120,
+    "profit_target": 0.33
+  }
+}
