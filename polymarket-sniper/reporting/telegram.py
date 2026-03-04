@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 from typing import Any
 
 from telegram import Update
@@ -34,6 +35,7 @@ class TelegramReporter:
             f"Mode: {snap.get('degradation_level', 0)}\n"
             f"Bankroll: ${snap.get('bankroll', 0.0):.2f}\n"
             f"Open positions: {len(snap.get('open_positions', {}))}\n"
+            f"Regime: {snap.get('bot', {}).get('current_regime', 'RANGING')}\n"
             f"Paused: {snap.get('bot', {}).get('paused', False)}"
         )
 
@@ -49,11 +51,39 @@ class TelegramReporter:
         if not rows:
             await update.message.reply_text("No trades yet.")
             return
-        lines = [f"{r['asset']} {r['direction']} {r['pnl_pct']:.1%} ({r['exit_reason']})" for r in rows]
+        lines = [f"{r['asset']} {r.get('strategy', 'NA')} {r['direction']} {r['pnl_pct']:.1%} ({r['exit_reason']})" for r in rows]
         await update.message.reply_text("\n".join(lines))
 
     async def cmd_signals(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Use /config and weights file for current signal profile.")
+
+    async def cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        positions = await self.state.get("open_positions", default={})
+        if not positions:
+            await update.message.reply_text("No open positions.")
+            return
+        lines = []
+        for asset, p in positions.items():
+            lines.append(f"{asset} {p.get('strategy')} {p.get('direction')} @ {p.get('entry_price'):.3f} size ${p.get('bet_size'):.2f}")
+        await update.message.reply_text("\n".join(lines))
+
+    async def cmd_regime(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        regime = await self.state.get("regime", default={})
+        await update.message.reply_text(str(regime))
+
+    async def cmd_strategies(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        level = int(await self.state.get("degradation_level", default=0))
+        allowed = {
+            0: ["ORACLE_ARB", "CROSS_ASSET_LAG", "EXHAUSTION_SNIPER", "MOMENTUM_RIDER", "MEAN_REVERSION"],
+            1: ["ORACLE_ARB", "CROSS_ASSET_LAG", "EXHAUSTION_SNIPER", "MOMENTUM_RIDER", "MEAN_REVERSION"],
+            2: ["ORACLE_ARB", "CROSS_ASSET_LAG", "EXHAUSTION_SNIPER"],
+            3: ["ORACLE_ARB"],
+        }[level]
+        await update.message.reply_text(f"Active strategies: {', '.join(allowed)}")
+
+    async def cmd_thought_train(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        last = await self.state.get("thought_train", "last_result", default={})
+        await update.message.reply_text(str(last or "No thought train run yet."))
 
     async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         bot = await self.state.get("bot", default={})
@@ -78,11 +108,24 @@ class TelegramReporter:
         await update.message.reply_text(f"Degradation level: {level}")
 
     async def cmd_performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.message.reply_text(str(self.metrics.summary()))
+        await update.message.reply_text(f"By asset: {self.metrics.summary()}\nBy strategy: {self.metrics.strategy_summary()}")
 
     async def cmd_config(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         version = await self.state.get("version", default={})
         await update.message.reply_text(f"Config version: {version.get('config', 1)}")
+
+    async def cmd_rollback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        versions = sorted(Path("data/versions").glob("signal_weights_*.json"))
+        if not versions:
+            await update.message.reply_text("No versions available.")
+            return
+        target = versions[-1]
+        if context.args and context.args[0].isdigit():
+            idx = int(context.args[0])
+            if 0 <= idx < len(versions):
+                target = versions[idx]
+        Path("data/signal_weights.json").write_text(target.read_text())
+        await update.message.reply_text(f"Rolled back weights to {target.name}")
 
     async def send_message(self, text: str) -> None:
         """Push message to configured chat if enabled."""
@@ -98,16 +141,30 @@ class TelegramReporter:
         self.metrics.on_exit(event)
         if event.get("exit_reason") == "STOP_LOSS_HIT":
             await self.send_message(f"STOP LOSS: {event.get('asset')} {event.get('pnl_pct', 0.0):.1%}")
-        if float(event.get("pnl_pct", 0.0)) > 0.5:
+        if float(event.get("pnl_pct", 0.0)) > 0.6:
             await self.send_message(f"Huge gain: {event.get('asset')} {event.get('pnl_pct', 0.0):.1%}")
 
     async def on_degradation_change(self, event: dict[str, Any]) -> None:
         await self.send_message(f"Mode changed: {event.get('profile', {}).get('name', event.get('new'))}")
 
+    async def on_regime_change(self, event: dict[str, Any]) -> None:
+        await self.send_message(f"Regime changed: {event.get('old')} -> {event.get('new')}")
+
+    async def on_weights_updated(self, event: dict[str, Any]) -> None:
+        await self.send_message(
+            f"Weights updated. old={float(event.get('old_win_rate', 0.0)):.1%} new={float(event.get('new_win_rate', 0.0)):.1%}"
+        )
+
+    async def on_thought_train(self, event: dict[str, Any]) -> None:
+        await self.send_message(f"Thought train complete: {event.get('loss_pattern')} changes={event.get('changes_made')}")
+
     async def run(self) -> None:
         """Start command handlers and keep bot running."""
         bus.subscribe("TRADE_EXITED", self.on_trade_exited)
         bus.subscribe("DEGRADATION_LEVEL_CHANGED", self.on_degradation_change)
+        bus.subscribe("REGIME_CHANGED", self.on_regime_change)
+        bus.subscribe("WEIGHTS_UPDATED", self.on_weights_updated)
+        bus.subscribe("THOUGHT_TRAIN_COMPLETED", self.on_thought_train)
         if not self.enabled or not self.app:
             while True:
                 await asyncio.sleep(3600)
@@ -116,13 +173,18 @@ class TelegramReporter:
             ("status", self.cmd_status),
             ("bankroll", self.cmd_bankroll),
             ("trades", self.cmd_trades),
+            ("positions", self.cmd_positions),
             ("signals", self.cmd_signals),
+            ("regime", self.cmd_regime),
+            ("strategies", self.cmd_strategies),
+            ("thought_train", self.cmd_thought_train),
             ("pause", self.cmd_pause),
             ("resume", self.cmd_resume),
             ("emergency_stop", self.cmd_emergency_stop),
             ("degradation", self.cmd_degradation),
             ("performance", self.cmd_performance),
             ("config", self.cmd_config),
+            ("rollback", self.cmd_rollback),
         ]:
             self.app.add_handler(CommandHandler(name, handler))
 

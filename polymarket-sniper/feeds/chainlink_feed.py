@@ -25,6 +25,7 @@ class ChainlinkFeed:
 
     def __init__(self, state: AppState) -> None:
         self.state = state
+        self._last_oracle_ts: dict[str, float] = {}
 
     async def _parse_price(self, payload: Any) -> float:
         if isinstance(payload, dict):
@@ -55,20 +56,23 @@ class ChainlinkFeed:
 
                             delta_pct = abs((oracle_price - spot) / spot)
                             lag_seconds = float(payload.get("lag_seconds", payload.get("seconds_since_update", 0.0)) or 0.0)
+                            updated = float(payload.get("updated_at", payload.get("timestamp", time.time())) or time.time())
+                            if updated > 1e12:
+                                updated /= 1000
                             if lag_seconds == 0:
-                                updated = float(payload.get("updated_at", payload.get("timestamp", time.time())) or time.time())
-                                if updated > 1e12:
-                                    updated /= 1000
                                 lag_seconds = max(0.0, time.time() - updated)
+                            direction = "UP" if oracle_price > spot else "DOWN"
 
                             oracle = await self.state.get("oracle", default={})
                             oracle.setdefault(asset, {})
                             oracle[asset].update(
                                 {
                                     "lag_seconds": lag_seconds,
+                                    "direction": direction,
+                                    "delta_pct": (oracle_price - spot) / spot,
                                     "oracle_price": oracle_price,
                                     "binance_price": spot,
-                                    "last_update_timestamp": time.time(),
+                                    "last_update_timestamp": updated,
                                 }
                             )
                             await self.state.set("oracle", value=oracle)
@@ -79,11 +83,14 @@ class ChainlinkFeed:
                                 "binance_price": spot,
                                 "lag_seconds": lag_seconds,
                                 "delta_pct": delta_pct,
+                                "direction": direction,
                             }
                             await bus.publish("CHAINLINK_UPDATE", update_payload)
+                            if self._last_oracle_ts.get(asset, 0.0) != updated:
+                                self._last_oracle_ts[asset] = updated
+                                await bus.publish("ORACLE_UPDATED", update_payload)
 
                             if lag_seconds > 2.0 and delta_pct > 0.003:
-                                direction = "UP" if oracle_price > spot else "DOWN"
                                 await bus.publish(
                                     "ORACLE_LAG_DETECTED",
                                     {**update_payload, "direction": direction, "estimated_window_seconds": lag_seconds},

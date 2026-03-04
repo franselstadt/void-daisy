@@ -109,6 +109,7 @@ class TradeExecutor:
         shares = round(bet_size / max(result.fill_price, 1e-9), 6)
         entered = {
             "asset": opportunity["asset"],
+            "strategy": opportunity.get("strategy", "EXHAUSTION_SNIPER"),
             "market_id": opportunity.get("market_id", ""),
             "direction": opportunity["direction"],
             "entry_price": result.fill_price,

@@ -11,6 +11,7 @@ class Metrics:
 
     def __init__(self) -> None:
         self.asset = defaultdict(lambda: {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0, "best": 0.0})
+        self.strategy = defaultdict(lambda: {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0})
 
     def on_exit(self, trade: dict[str, Any]) -> None:
         """Update counters from closed trade."""
@@ -24,7 +25,17 @@ class Metrics:
         else:
             row["losses"] += 1
         row["best"] = max(row["best"], float(trade.get("pnl_pct", 0.0)))
+        s = trade.get("strategy", "UNKNOWN")
+        srow = self.strategy[s]
+        srow["trades"] += 1
+        srow["wins"] += 1 if pnl > 0 else 0
+        srow["losses"] += 0 if pnl > 0 else 1
+        srow["pnl"] += pnl
 
     def summary(self) -> dict[str, dict[str, float]]:
         """Return current summary snapshot."""
         return {k: dict(v) for k, v in self.asset.items()}
+
+    def strategy_summary(self) -> dict[str, dict[str, float]]:
+        """Return strategy breakdown."""
+        return {k: dict(v) for k, v in self.strategy.items()}

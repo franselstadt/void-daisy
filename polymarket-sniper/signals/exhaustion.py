@@ -14,16 +14,24 @@ from core.logger import logger
 
 DEFAULT_WEIGHTS = {
     "velocity_slowing": 1.4,
+    "acceleration_positive": 1.6,
     "spread_tightening": 0.9,
-    "volume_dropping": 0.6,
+    "volume_exhaustion": 0.8,
     "price_stabilising": 1.1,
+    "bid_depth_building": 1.3,
+    "rsi_extreme": 1.8,
+    "round_number_proximity": 0.5,
+    "btc_led_and_stabilising": 1.2,
+    "chainlink_lag": 1.2,
+    "consecutive_down_candles": 0.7,
+    "cross_asset_divergence": 1.0,
+    "vwap_extreme": 0.9,
+    # compatibility aliases
+    "volume_dropping": 0.6,
     "bids_building": 1.3,
     "rsi_oversold": 1.8,
-    "round_number_proximity": 0.5,
     "btc_led_move": 1.2,
-    "chainlink_lag": 1.2,
     "consecutive_candles": 0.7,
-    "cross_asset_divergence": 1.0,
 }
 
 
@@ -86,8 +94,11 @@ class ExhaustionScorer:
         volume_ratio = float(context.get("volume_ratio", 1.0))
         rsi = float(context.get("rsi_14", 50.0))
         spot = float(context.get("spot_price", 0.0))
+        accel = float(context.get("acceleration", 0.0))
+        vwap_dev = float(context.get("vwap_deviation", 0.0))
         orderbook = context.get("orderbook", {})
         btc_v = float(context.get("btc_velocity_10s", 0.0))
+        btc_accel = float(context.get("btc_acceleration", 0.0))
         lag = float(context.get("oracle_lag_seconds", 0.0))
         candles = int(context.get("consecutive_candles", 0))
         div = abs(float(context.get("cross_asset_divergence", 0.0)))
@@ -101,22 +112,43 @@ class ExhaustionScorer:
                 scores[name] = float(w.get(name, 0.0))
 
         trigger("velocity_slowing", v30 > 0 and v10 < v30 * 0.6)
+        trigger("acceleration_positive", accel > 0 and direction == "UP")
         trigger("spread_tightening", prev_spread > 0 and spread < prev_spread * 0.8)
+        trigger("volume_exhaustion", volume_ratio < 0.6)
         trigger("volume_dropping", volume_ratio < 0.6)
         trigger("price_stabilising", v30 > 0 and v10 < v30 * 0.3)
         bids = float(orderbook.get("bids_volume", 0.0))
         asks = float(orderbook.get("asks_volume", 0.0))
+        trigger("bid_depth_building", bids > asks * 1.1)
         trigger("bids_building", bids > asks * 1.1)
+        trigger("rsi_extreme", (direction == "UP" and rsi < 22) or (direction == "DOWN" and rsi > 78))
         trigger("rsi_oversold", (direction == "UP" and rsi < 25) or (direction == "DOWN" and rsi > 75))
         if spot > 0:
             round_unit = round(spot / 1000) * 1000
             trigger("round_number_proximity", abs(spot - round_unit) / spot <= 0.001)
         else:
             trigger("round_number_proximity", False)
-        trigger("btc_led_move", (direction == "UP" and btc_v > 0 and abs(btc_v) > abs(float(context.get("velocity_10s", 0.0)))) or (direction == "DOWN" and btc_v < 0 and abs(btc_v) > abs(float(context.get("velocity_10s", 0.0)))))
+        trigger(
+            "btc_led_and_stabilising",
+            (
+                direction == "UP"
+                and btc_v > 0
+                and abs(btc_v) > abs(float(context.get("velocity_10s", 0.0)))
+                and btc_accel > 0
+            )
+            or (
+                direction == "DOWN"
+                and btc_v < 0
+                and abs(btc_v) > abs(float(context.get("velocity_10s", 0.0)))
+                and btc_accel < 0
+            ),
+        )
+        trigger("btc_led_move", (direction == "UP" and btc_v > 0) or (direction == "DOWN" and btc_v < 0))
         trigger("chainlink_lag", lag > 2.0)
+        trigger("consecutive_down_candles", candles >= 3)
         trigger("consecutive_candles", candles >= 3)
         trigger("cross_asset_divergence", div > 0.15)
+        trigger("vwap_extreme", (direction == "UP" and vwap_dev < -0.004) or (direction == "DOWN" and vwap_dev > 0.004))
 
         total = round(sum(scores.values()), 4)
         return {"score": total, "signals_fired": fired, "signal_scores": scores}

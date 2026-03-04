@@ -13,7 +13,7 @@ SCHEMA = [
 CREATE TABLE IF NOT EXISTS trades (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   timestamp TEXT, asset TEXT, market_id TEXT,
-  direction TEXT, entry_price REAL, exit_price REAL,
+  strategy TEXT, direction TEXT, entry_price REAL, exit_price REAL,
   exit_reason TEXT, bet_size REAL, shares REAL,
   gross_pnl REAL, net_pnl REAL, pnl_pct REAL,
   won INTEGER, held_past_33 INTEGER, extra_gain REAL,
@@ -22,8 +22,10 @@ CREATE TABLE IF NOT EXISTS trades (
   seconds_remaining_at_entry INTEGER,
   bankroll_at_entry REAL, win_rate_10_at_entry REAL,
   consecutive_losses_at_entry INTEGER,
-  cross_asset_trade INTEGER, oracle_lag_present INTEGER,
-  degradation_level INTEGER, paper INTEGER DEFAULT 0
+  regime_at_entry TEXT,
+  degradation_level_at_entry INTEGER,
+  oracle_lag_present INTEGER, cross_asset_trade INTEGER,
+  maker_fill INTEGER, paper INTEGER DEFAULT 0
 )
 """,
     """
@@ -40,6 +42,33 @@ CREATE TABLE IF NOT EXISTS signal_history (
   timestamp TEXT, signal_name TEXT,
   old_weight REAL, new_weight REAL,
   accuracy_at_change REAL
+)
+""",
+    """
+CREATE TABLE IF NOT EXISTS thought_trains (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  timestamp TEXT,
+  trigger_reason TEXT,
+  loss_pattern TEXT,
+  root_cause TEXT,
+  regime_at_time TEXT,
+  changes_made TEXT,
+  success INTEGER,
+  win_rate_before REAL,
+  win_rate_after_5_trades REAL
+)
+""",
+    """
+CREATE TABLE IF NOT EXISTS regime_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  timestamp TEXT,
+  regime TEXT,
+  trend_score REAL,
+  volatility_ratio REAL,
+  correlation_score REAL,
+  duration_seconds INTEGER,
+  pnl_during_regime REAL,
+  best_strategy TEXT
 )
 """,
 ]
@@ -65,18 +94,20 @@ class TradeLogger:
             await db.execute(
                 """
                 INSERT INTO trades (
-                  timestamp, asset, market_id, direction, entry_price, exit_price,
+                  timestamp, asset, market_id, strategy, direction, entry_price, exit_price,
                   exit_reason, bet_size, shares, gross_pnl, net_pnl, pnl_pct, won,
                   held_past_33, extra_gain, exhaustion_score, confidence, edge_pct,
                   signals_fired, signal_scores, seconds_remaining_at_entry,
                   bankroll_at_entry, win_rate_10_at_entry, consecutive_losses_at_entry,
-                  cross_asset_trade, oracle_lag_present, degradation_level, paper
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  regime_at_entry, degradation_level_at_entry, oracle_lag_present,
+                  cross_asset_trade, maker_fill, paper
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trade.get("timestamp", ""),
                     trade.get("asset", ""),
                     trade.get("market_id", ""),
+                    trade.get("strategy", ""),
                     trade.get("direction", ""),
                     trade.get("entry_price", 0.0),
                     trade.get("exit_price", 0.0),
@@ -98,9 +129,11 @@ class TradeLogger:
                     trade.get("bankroll_at_entry", 0.0),
                     trade.get("win_rate_10_at_entry", 0.0),
                     trade.get("consecutive_losses_at_entry", 0),
-                    int(bool(trade.get("cross_asset_trade", False))),
+                    trade.get("regime_at_entry", "RANGING"),
+                    trade.get("degradation_level_at_entry", trade.get("degradation_level", 0)),
                     int(bool(trade.get("oracle_lag_present", False))),
-                    trade.get("degradation_level", 0),
+                    int(bool(trade.get("cross_asset_trade", False))),
+                    int(bool(trade.get("maker", False))),
                     trade.get("paper", 0),
                 ),
             )
@@ -126,6 +159,30 @@ class TradeLogger:
                     row.get("new_win_rate", 0.0),
                     row.get("improvement", 0.0),
                     json.dumps(row.get("changes", {})),
+                ),
+            )
+            await db.commit()
+
+    async def log_thought_train(self, row: dict[str, Any]) -> None:
+        """Persist thought-train diagnostics."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO thought_trains (
+                  timestamp, trigger_reason, loss_pattern, root_cause, regime_at_time,
+                  changes_made, success, win_rate_before, win_rate_after_5_trades
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row.get("timestamp", ""),
+                    row.get("trigger_reason", ""),
+                    row.get("loss_pattern", ""),
+                    row.get("root_cause", ""),
+                    row.get("regime_at_time", ""),
+                    json.dumps(row.get("changes_made", {})),
+                    int(bool(row.get("success", False))),
+                    row.get("win_rate_before", 0.0),
+                    row.get("win_rate_after_5_trades", 0.0),
                 ),
             )
             await db.commit()

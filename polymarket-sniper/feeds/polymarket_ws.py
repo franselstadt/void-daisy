@@ -43,9 +43,11 @@ class PolymarketFeed:
                         continue
                     for asset in updated:
                         if asset.lower() in question:
-                            token_id = str(m.get("clobTokenIds", ""))
-                            if token_id:
-                                updated[asset].append(token_id)
+                            token_ids = m.get("clobTokenIds", [])
+                            if isinstance(token_ids, list):
+                                updated[asset].extend(str(t) for t in token_ids if t)
+                            elif token_ids:
+                                updated[asset].append(str(token_ids))
                 self._market_map = updated
             except Exception as exc:  # noqa: BLE001
                 logger.warning("gamma_refresh_failed", error=str(exc))
@@ -102,8 +104,9 @@ class PolymarketFeed:
                         orderbook = data.get("orderbook", {})
 
                         latest = await self.state.get("latest_ticks", default={})
-                        v10 = float(latest.get(asset, {}).get("velocity_10s", 0.0))
-                        expected_yes = min(0.99, max(0.01, 0.5 + (v10 * 15)))
+                        v30 = float(latest.get(asset, {}).get("velocity_30s", 0.0))
+                        sensitivity = 30.0
+                        expected_yes = min(0.99, max(0.01, 0.50 + (v30 * 30 * sensitivity)))
 
                         tick = {
                             "asset": asset,
@@ -114,6 +117,7 @@ class PolymarketFeed:
                             "spread": spread,
                             "expected_yes": expected_yes,
                             "lag_score": abs(expected_yes - yes_price),
+                            "price_change_since_last_tick": 0.0,
                             "seconds_remaining": self._seconds_remaining(data.get("end_date")),
                             "orderbook": orderbook,
                             "timestamp": time.time(),
@@ -126,8 +130,10 @@ class PolymarketFeed:
                         prev = self._prev_prices.get(asset)
                         if prev:
                             py, pn = prev
-                            if abs(yes_price - py) > 0.20 or abs(no_price - pn) > 0.20:
-                                await bus.publish("PRICE_CRASH_DETECTED", tick)
+                            crash_mag = max(abs(yes_price - py), abs(no_price - pn))
+                            tick["price_change_since_last_tick"] = yes_price - py
+                            if crash_mag > 0.15:
+                                await bus.publish("PRICE_CRASH", {**tick, "crash_magnitude": crash_mag})
                         self._prev_prices[asset] = (yes_price, no_price)
             except asyncio.TimeoutError:
                 continue

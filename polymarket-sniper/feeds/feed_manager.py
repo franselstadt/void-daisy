@@ -26,4 +26,11 @@ class FeedManager:
                     last_seen = float(data.get("last_seen", now))
                     if not data.get("connected", False) or now - last_seen > 60:
                         logger.warning("feed_unhealthy", feed=name, stale_seconds=round(now - last_seen, 3))
+                if name == "binance" and isinstance(data, dict):
+                    for asset, row in data.items():
+                        if not isinstance(row, dict):
+                            continue
+                        last_seen = float(row.get("last_seen", now))
+                        if not row.get("connected", False) or now - last_seen > 60:
+                            logger.warning("feed_unhealthy", feed=f"binance.{asset}", stale_seconds=round(now - last_seen, 3))
             await asyncio.sleep(10)
