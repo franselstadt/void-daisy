@@ -1,26 +1,41 @@
-"""OpenClaw health check executed every 60 seconds."""
+"""OpenClaw health check executed every 60 seconds as a separate process.
+
+Since this runs independently, it checks file-based indicators rather
+than in-memory state which only exists in the main bot process.
+"""
 
 from __future__ import annotations
 
+import os
 import sys
 import time
-
-from core.state import state
+from pathlib import Path
 
 
 def main() -> int:
-    now = time.time()
-    bankroll = float(state.get('stats.bankroll', state.get('bankroll', 0.0)))
-    if bankroll <= 0:
-        return 2
-    if not state.get('feed.polymarket.connected', False):
-        return 3
-    for a in ['BTC', 'ETH', 'SOL', 'XRP']:
-        if not state.get(f'feed.binance.{a}.connected', False):
-            return 4
-        ts = float(state.get(f'price.{a}.timestamp', 0.0))
-        if ts > 0 and now - ts > 20:
-            return 5
+    os.chdir(os.path.dirname(os.path.dirname(__file__)) or '.')
+
+    log_path = Path('data/bot.log')
+    if log_path.exists():
+        age = time.time() - log_path.stat().st_mtime
+        if age > 120:
+            print(f'UNHEALTHY: log file stale ({age:.0f}s)')
+            return 1
+    else:
+        print('UNHEALTHY: no log file found')
+        return 1
+
+    db_path = Path('data/trades.db')
+    if not db_path.exists():
+        print('UNHEALTHY: trades.db missing')
+        return 1
+
+    config_path = Path('data/config.json')
+    if not config_path.exists():
+        print('UNHEALTHY: config.json missing')
+        return 1
+
+    print('HEALTHY')
     return 0
 
 

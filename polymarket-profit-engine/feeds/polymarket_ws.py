@@ -76,7 +76,10 @@ class PolymarketFeed:
                     backoff = 0.2
                     while True:
                         await self._subscribe(ws)
-                        raw = await asyncio.wait_for(ws.recv(), timeout=1)
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                        except asyncio.TimeoutError:
+                            continue
                         data = json.loads(raw)
                         asset = str(data.get('asset', '')).upper()
                         if asset not in self.market_map:
@@ -125,8 +128,6 @@ class PolymarketFeed:
                         await bus.publish('POLYMARKET_TICK', payload)
                         if crash > 0.15:
                             await bus.publish('PRICE_CRASH', {**payload, 'crash_magnitude': crash})
-            except asyncio.TimeoutError:
-                continue
             except Exception as exc:  # noqa: BLE001
                 await state.set('feed.polymarket.connected', False)
                 await bus.publish('FEED_DISCONNECTED', {'feed': 'polymarket', 'error': str(exc)})

@@ -14,7 +14,7 @@ Handler = Callable[[dict[str, Any]], Awaitable[None]]
 
 class EventBus:
     def __init__(self) -> None:
-        self._q: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue(maxsize=10000)
+        self._q: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue(maxsize=100_000)
         self._handlers: dict[str, list[Handler]] = defaultdict(list)
 
     def subscribe(self, event_type: str, handler: Handler) -> None:

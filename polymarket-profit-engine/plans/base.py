@@ -21,8 +21,12 @@ class Opportunity:
     market_id: str
     token_id: str
     seconds_remaining: int
+    window_elapsed: int
     spread: float
     signals_fired: list[str]
+    signal_scores: dict[str, float]
+    urgency: float
+    stop_loss_price: float
     timestamp: float
 
     def to_dict(self) -> dict[str, Any]:
@@ -51,7 +55,11 @@ class BasePlan:
             market_id=str(ctx.get('market_id', '')),
             token_id=str(ctx.get('token_id', '')),
             seconds_remaining=int(ctx.get('seconds_remaining', 0)),
+            window_elapsed=int(ctx.get('window_elapsed', 0)),
             spread=float(ctx.get('spread', 0.0)),
             signals_fired=fired,
+            signal_scores={},
+            urgency=getattr(self, 'urgency', 1.0),
+            stop_loss_price=0.02,
             timestamp=float(ctx.get('timestamp', time.time())),
         )

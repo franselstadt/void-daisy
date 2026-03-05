@@ -55,8 +55,32 @@ class L1Bayesian:
             state.set_sync(f'learning.l1.win_rate.{s}', b['conservative_estimate'])
         state.set_sync('learning.l1.beliefs', self.beliefs)
 
+    def _maybe_update_weights(self) -> None:
+        """Update signal_weights.json when beliefs diverge >20% from weights."""
+        weights_path = Path('data/signal_weights.json')
+        try:
+            weights = json.loads(weights_path.read_text()) if weights_path.exists() else {}
+        except Exception:
+            return
+        if not weights:
+            return
+        changed = False
+        for signal, belief in self.beliefs.items():
+            conservative = belief.get('conservative_estimate', 0.5)
+            current_w = weights.get(signal)
+            if current_w is None:
+                continue
+            if abs(conservative - 0.5) > 0.01:
+                target = current_w * (0.8 + conservative * 0.4)
+                if abs(target - current_w) / max(current_w, 1e-9) > 0.20:
+                    weights[signal] = round(max(0.1, min(3.0, target)), 4)
+                    changed = True
+        if changed:
+            weights_path.write_text(json.dumps(weights, indent=2, sort_keys=True))
+
     async def run(self) -> None:
         bus.subscribe('TRADE_EXITED', self.on_exit)
         while True:
             self._save()
+            self._maybe_update_weights()
             await asyncio.sleep(600)

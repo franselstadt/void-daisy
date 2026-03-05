@@ -24,17 +24,26 @@ STREAMS = {
 
 @dataclass
 class AssetBuffer:
-    prices: deque[float] = field(default_factory=lambda: deque(maxlen=1000))
-    volumes: deque[float] = field(default_factory=lambda: deque(maxlen=1000))
-    timestamps: deque[float] = field(default_factory=lambda: deque(maxlen=1000))
-    sides: deque[str] = field(default_factory=lambda: deque(maxlen=1000))
-    accelerations: deque[float] = field(default_factory=lambda: deque(maxlen=1000))
+    prices: deque[float] = field(default_factory=lambda: deque(maxlen=2000))
+    volumes: deque[float] = field(default_factory=lambda: deque(maxlen=2000))
+    timestamps: deque[float] = field(default_factory=lambda: deque(maxlen=2000))
+    sides: deque[str] = field(default_factory=lambda: deque(maxlen=2000))
+    accelerations: deque[float] = field(default_factory=lambda: deque(maxlen=2000))
+    _vwap_pv: float = 0.0
+    _vwap_v: float = 0.0
+    _vwap_count: int = 0
 
     def add(self, price: float, volume: float, ts: float, side: str) -> None:
         self.prices.append(price)
         self.volumes.append(volume)
         self.timestamps.append(ts)
         self.sides.append(side)
+        self._vwap_pv += price * volume
+        self._vwap_v += volume
+        self._vwap_count += 1
+        if self._vwap_count % 10000 == 0:
+            self._vwap_pv = price * volume
+            self._vwap_v = volume
 
     def _price_ago(self, secs: float) -> float:
         if not self.timestamps:
@@ -88,15 +97,18 @@ class AssetBuffer:
         return sum(x for x, _ in pv) / tv
 
     def _consecutive(self) -> int:
-        if not self.sides:
+        if len(self.prices) < 2:
             return 0
-        last = self.sides[-1]
-        c = 0
-        for s in reversed(self.sides):
-            if s != last:
+        px = list(self.prices)[-50:]
+        direction = 1 if px[-1] > px[-2] else -1
+        count = 0
+        for i in range(len(px) - 1, 0, -1):
+            d = 1 if px[i] > px[i - 1] else -1
+            if d == direction:
+                count += direction
+            else:
                 break
-            c += 1
-        return c if last == 'BUY' else -c
+        return count
 
     def metrics(self) -> dict[str, float]:
         if len(self.prices) < 3:
