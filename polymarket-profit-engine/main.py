@@ -123,15 +123,30 @@ async def log_trade(row: dict, path: str = "data/trades.db") -> None:
 async def hourly_report(reporter: TelegramReporter) -> None:
     while True:
         await asyncio.sleep(3600)
+        bankroll = float(state.get('stats.bankroll', state.get('bankroll', 0.0)))
+        pnl_hour = float(state.get("stats.pnl_this_hour", 0.0))
+        pnl_session = float(state.get("stats.pnl_session", 0.0))
+        wr10 = float(state.get("stats.win_rate_10", 0.5))
+        wr20 = float(state.get("stats.win_rate_20", 0.5))
+        dd = float(state.get("stats.drawdown_pct", 0.0))
+        trades = int(state.get("stats.trades_this_session", 0))
+        level = int(state.get("bot.degradation_level", 0))
+        mode = LEVELS.get(level, {}).get("name", "NORMAL")
+        regime = state.get("bot.current_regime", "RANGING")
+        paper = "PAPER" if state.get("bot.paper_mode", True) else "LIVE"
+        tt_active = "YES" if state.get("bot.thought_train_active", False) else "no"
+
         lines = [f"🦞 HOURLY REPORT — {datetime.now(timezone.utc).strftime('%H:%M UTC')}"]
+        lines.append(f"Mode: {paper} | {mode} (L{level}) | Regime: {regime}")
+        lines.append(f"Bankroll: ${bankroll:.2f} | Drawdown: {dd:.1%}")
+        lines.append(f"PnL: hour ${pnl_hour:+.2f} | session ${pnl_session:+.2f}")
+        lines.append(f"Win Rate: {wr10:.0%} (10) | {wr20:.0%} (20) | Trades: {trades}")
+        lines.append(f"Thought Train: {tt_active}")
         for asset in ["BTC", "ETH", "SOL", "XRP"]:
-            lines.append(
-                f"{asset} | coverage {int(state.get(f'coverage.window_covered.{asset}', 0))}/"
-                f"{int(state.get(f'coverage.window_total.{asset}', 0))}"
-            )
-        lines.append(f"Bankroll: ${float(state.get('stats.bankroll', state.get('bankroll', 0.0))):.2f}")
-        mode = LEVELS.get(int(state.get("bot.degradation_level", 0)), {}).get("name", "NORMAL")
-        lines.append(f"Regime: {state.get('bot.current_regime', 'RANGING')} | Mode: {mode}")
+            covered = int(state.get(f'coverage.window_covered.{asset}', 0))
+            total = int(state.get(f'coverage.window_total.{asset}', 0))
+            pct = f"{covered/total*100:.0f}%" if total else "0%"
+            lines.append(f"  {asset} coverage {pct} ({covered}/{total})")
         await reporter.send("\n".join(lines))
         state.set_sync("stats.pnl_this_hour", 0.0)
 
