@@ -1,0 +1,102 @@
+{
+  "assets": {
+    "BTC": {
+      "is_anchor": true,
+      "momentum": [
+        0.38,
+        0.62
+      ],
+      "reversion_hi": [
+        0.66,
+        0.82
+      ],
+      "reversion_lo": [
+        0.18,
+        0.34
+      ],
+      "sniper": [
+        0.06,
+        0.13
+      ],
+      "stream": "btcusdt@trade"
+    },
+    "ETH": {
+      "correlation_leader": "BTC",
+      "initial_lag_seconds": 8,
+      "momentum": [
+        0.36,
+        0.64
+      ],
+      "reversion_hi": [
+        0.67,
+        0.83
+      ],
+      "reversion_lo": [
+        0.17,
+        0.33
+      ],
+      "sniper": [
+        0.06,
+        0.13
+      ],
+      "stream": "ethusdt@trade"
+    },
+    "SOL": {
+      "correlation_leader": "BTC",
+      "initial_lag_seconds": 12,
+      "momentum": [
+        0.35,
+        0.65
+      ],
+      "reversion_hi": [
+        0.67,
+        0.83
+      ],
+      "reversion_lo": [
+        0.17,
+        0.33
+      ],
+      "sniper": [
+        0.05,
+        0.14
+      ],
+      "stream": "solusdt@trade"
+    },
+    "XRP": {
+      "momentum": [
+        0.38,
+        0.62
+      ],
+      "news_blackout_enabled": true,
+      "reversion_hi": [
+        0.66,
+        0.82
+      ],
+      "reversion_lo": [
+        0.18,
+        0.34
+      ],
+      "sniper": [
+        0.07,
+        0.13
+      ],
+      "stream": "xrpusdt@trade"
+    }
+  },
+  "trading": {
+    "maker_timeout_seconds": 3,
+    "max_positions": 4,
+    "max_proxy_retries": 10,
+    "max_seconds": 270,
+    "max_spread": 0.05,
+    "max_total_exposure_pct": 0.4,
+    "min_bet": 1.0,
+    "min_confidence": 0.62,
+    "min_exhaustion": 3.5,
+    "min_seconds": 100
+  },
+  "window": {
+    "prime_zone_end": 190,
+    "prime_zone_start": 120
+  }
+}
