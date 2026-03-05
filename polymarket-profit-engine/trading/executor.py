@@ -61,8 +61,8 @@ class Executor:
     async def _live_fill(self, token_id: str, side: str, px: float, size: float) -> Result:
         if self._client is None:
             return Result(False, error='live_client_unavailable')
-        maker_timeout = float(config.get('trading.maker_timeout_seconds', 3))
-        max_retries = int(config.get('trading.max_proxy_retries', 10))
+        maker_timeout = float(config.get('trading', 'maker_timeout_seconds', default=3))
+        max_retries = int(config.get('trading', 'max_proxy_retries', default=10))
 
         for attempt in range(max_retries + 1):
             try:

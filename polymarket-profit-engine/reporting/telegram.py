@@ -261,6 +261,26 @@ class TelegramReporter:
         state.set_sync(f'plan.{plan}.disabled', False)
         await update.message.reply_text(f'✅ {plan} enabled.')
 
+    async def cmd_disable(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            return
+        if not context.args:
+            await update.message.reply_text('Usage: /disable PLAN_01')
+            return
+        plan = context.args[0].upper()
+        state.set_sync(f'plan.{plan}.disabled', True)
+        await update.message.reply_text(f'🚫 {plan} disabled.')
+
+    async def cmd_enable(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            return
+        if not context.args:
+            await update.message.reply_text('Usage: /enable PLAN_01')
+            return
+        plan = context.args[0].upper()
+        state.set_sync(f'plan.{plan}.disabled', False)
+        await update.message.reply_text(f'✅ {plan} enabled.')
+
     async def cmd_paper_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return

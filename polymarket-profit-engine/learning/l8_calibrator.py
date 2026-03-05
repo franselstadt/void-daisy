@@ -1,9 +1,7 @@
-"""L8 threshold and prime-zone calibrator.
+"""L8 adaptive threshold calibrator.
 
-Runs every 3600s. Calibrates:
-  - Window prime-zone boundaries from winning entry timestamps
-  - Per-plan confidence and exhaustion thresholds
-  - Applies thought train recommendations
+Calibrates per-plan thresholds and handles thought train recommendations.
+Runs every 3600s (config learning.l8_optimize_every_secs).
 """
 
 from __future__ import annotations
@@ -11,16 +9,16 @@ from __future__ import annotations
 import asyncio
 from statistics import mean, pstdev
 
-from core.event_bus import bus
+from core.config import config
 from core.state import state
 
 
 class L8Calibrator:
     def __init__(self) -> None:
-        self._pending_recommendations: list[dict] = []
+        self._pending_tt: list[dict] = []
 
     async def on_thought_train(self, event: dict) -> None:
-        self._pending_recommendations.append(event)
+        self._pending_tt.append(event)
 
     def _calibrate_prime_zone(self) -> None:
         wins = list(state.get('stats._entry_elapsed_wins', []))
@@ -36,56 +34,39 @@ class L8Calibrator:
     def _calibrate_plan_thresholds(self) -> None:
         for i in range(1, 13):
             plan = f'PLAN_{i:02d}'
-            seq = list(state.get(f'stats._plan_last10.{plan}', []))
-            if len(seq) < 5:
+            wr = float(state.get(f'stats.win_rate_20.{plan}', 0.5))
+            plan_cfg = config.get('plans', plan, default={}) or {}
+            if not isinstance(plan_cfg, dict):
                 continue
-            wr = sum(seq) / len(seq) if seq else 0.5
 
-            cur_conf = float(state.get(f'calibration.{plan}.min_confidence', 0.62))
-            cur_exh = float(state.get(f'calibration.{plan}.min_exhaustion', 3.5))
+            base_conf = float(plan_cfg.get('min_confidence', 0.62))
+            base_exh = float(plan_cfg.get('min_exhaustion', 3.5))
 
-            if wr > 0.70:
-                new_conf = max(0.55, cur_conf - 0.01)
-                new_exh = max(3.0, cur_exh - 0.1)
+            if wr > 0.65:
+                state.set_sync(f'learning.l8.thresholds.{plan}.min_confidence', max(0.50, base_conf - 0.03))
+                state.set_sync(f'learning.l8.thresholds.{plan}.min_exhaustion', max(2.5, base_exh - 0.3))
             elif wr < 0.45:
-                new_conf = min(0.85, cur_conf + 0.02)
-                new_exh = min(6.0, cur_exh + 0.2)
-            else:
-                new_conf = cur_conf
-                new_exh = cur_exh
-
-            state.set_sync(f'calibration.{plan}.min_confidence', round(new_conf, 4))
-            state.set_sync(f'calibration.{plan}.min_exhaustion', round(new_exh, 2))
+                state.set_sync(f'learning.l8.thresholds.{plan}.min_confidence', min(0.85, base_conf + 0.05))
+                state.set_sync(f'learning.l8.thresholds.{plan}.min_exhaustion', min(6.0, base_exh + 0.5))
 
     def _apply_thought_train_recommendations(self) -> None:
-        while self._pending_recommendations:
-            rec = self._pending_recommendations.pop(0)
-            pattern = rec.get('loss_pattern', '')
-            changes = rec.get('changes_made', {})
-
+        for tt in self._pending_tt:
+            pattern = tt.get('loss_pattern', '')
             if pattern == 'ENTRY_TOO_EARLY':
-                for i in range(1, 13):
-                    plan = f'PLAN_{i:02d}'
-                    cur = float(state.get(f'calibration.{plan}.min_exhaustion', 3.5))
-                    state.set_sync(f'calibration.{plan}.min_exhaustion', min(6.0, cur + 0.15))
-
-            elif pattern == 'STRATEGY_MISMATCH':
-                regime = rec.get('regime_at_time', 'RANGING')
-                for i in range(1, 13):
-                    plan = f'PLAN_{i:02d}'
-                    wr = sum(state.get(f'stats._plan_last10.{plan}', [])) / max(1, len(state.get(f'stats._plan_last10.{plan}', [])))
-                    if wr < 0.3:
-                        state.set_sync(f'calibration.{plan}.regime_penalty.{regime}', 0.5)
-
+                cur = float(state.get('trading.min_exhaustion_override', 3.5))
+                state.set_sync('trading.min_exhaustion_override', min(6.0, cur + 0.3))
             elif pattern == 'SIGNAL_NOISE':
-                for i in range(1, 13):
-                    plan = f'PLAN_{i:02d}'
-                    cur = float(state.get(f'calibration.{plan}.min_confidence', 0.62))
-                    state.set_sync(f'calibration.{plan}.min_confidence', min(0.85, cur + 0.01))
+                cur_conf = float(config.get('trading', 'min_confidence', default=0.62))
+                state.set_sync('trading.min_confidence_override', min(0.80, cur_conf + 0.04))
+            elif pattern == 'STRATEGY_MISMATCH':
+                regime = tt.get('regime_at_time', 'RANGING')
+                state.set_sync(f'learning.l8.regime_penalty.{regime}', 0.8)
+        self._pending_tt.clear()
 
     async def run(self) -> None:
+        interval = int(config.get('learning', 'l8_optimize_every_secs', default=3600))
         while True:
             self._calibrate_prime_zone()
             self._calibrate_plan_thresholds()
             self._apply_thought_train_recommendations()
-            await asyncio.sleep(3600)
+            await asyncio.sleep(interval)

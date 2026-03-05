@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import ujson
 from pathlib import Path
 from threading import RLock
 from typing import Any
 
+import ujson
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from core.logger import logger
+from loguru import logger
 
 DEFAULT: dict[str, Any] = {
     "version": 1,
@@ -88,59 +88,64 @@ class _Watcher(FileSystemEventHandler):
     def __init__(self, cfg: 'Config') -> None:
         self.cfg = cfg
 
-    def on_modified(self, event):  # type: ignore[no-untyped-def]
-        if Path(event.src_path) == self.cfg.path:
-            self.cfg.reload()
+    def on_modified(self, event) -> None:  # type: ignore[no-untyped-def]
+        if "config.json" in str(event.src_path):
+            self.cfg._load()
+            logger.info("Config hot-reloaded — no restart needed")
 
 
 class Config:
-    def __init__(self, path: str = 'data/config.json') -> None:
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self) -> None:
+        self._path = Path("data/config.json")
         self._lock = RLock()
-        self._cfg: dict[str, Any] = {}
-        self._obs: Observer | None = None
-        if not self.path.exists():
-            self._cfg = DEFAULT
-            self.save()
-        self.reload()
+        self._data: dict[str, Any] = dict(DEFAULT)
+        self._load()
+        self._observer: Observer | None = None
 
-    def reload(self) -> None:
-        with self._lock:
+    def _load(self) -> None:
+        if self._path.exists():
             try:
-                self._cfg = ujson.loads(self.path.read_text())
-            except Exception:
-                self._cfg = DEFAULT
+                with open(self._path) as f:
+                    with self._lock:
+                        self._data = ujson.load(f)
+                logger.info(f"Config loaded v{self._data.get('version', 1)}")
+            except Exception as e:
+                logger.error(f"Config load error: {e}")
+
+    def _save(self) -> None:
+        self._path.parent.mkdir(exist_ok=True)
+        with open(self._path, "w") as f:
+            ujson.dump(self._data, f, indent=2)
 
     def start(self) -> None:
-        if self._obs:
+        if self._observer:
             return
-        self._obs = Observer()
-        self._obs.schedule(_Watcher(self), str(self.path.parent), recursive=False)
-        self._obs.start()
-        logger.info('config_watch_started', path=str(self.path))
+        self._observer = Observer()
+        self._observer.schedule(_Watcher(self), str(self._path.parent), recursive=False)
+        self._observer.daemon = True
+        self._observer.start()
 
     def get(self, *keys: str, default: Any = None) -> Any:
-        d: Any = self._cfg
-        for p in keys:
-            if not isinstance(d, dict) or p not in d:
-                return default
-            d = d[p]
-        return d
-
-    def update(self, patch: dict[str, Any]) -> None:
         with self._lock:
-            for k, v in patch.items():
-                if isinstance(v, dict) and isinstance(self._cfg.get(k), dict):
-                    self._cfg[k].update(v)
+            d = self._data
+            for k in keys:
+                if not isinstance(d, dict):
+                    return default
+                d = d.get(k, default)
+            return d
+
+    def update(self, updates: dict) -> None:
+        def _deep(base: dict, upd: dict) -> None:
+            for k, v in upd.items():
+                if isinstance(v, dict) and isinstance(base.get(k), dict):
+                    _deep(base[k], v)
                 else:
-                    self._cfg[k] = v
-            self._cfg["version"] = self._cfg.get("version", 0) + 1
-            self.save()
-
-    def save(self) -> None:
+                    base[k] = v
         with self._lock:
-            self.path.write_text(ujson.dumps(self._cfg, indent=2, sort_keys=True))
+            _deep(self._data, updates)
+            self._data["version"] = self._data.get("version", 1) + 1
+        self._save()
+        logger.info(f"Config updated → v{self._data['version']}")
 
 
 config = Config()

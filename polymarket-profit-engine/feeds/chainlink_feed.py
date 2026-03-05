@@ -95,6 +95,7 @@ async def start_chainlink_feed() -> None:
                         if lag > 2.5 and abs(delta) > 0.003:
                             await bus.publish('ORACLE_LAG_DETECTED', payload_evt)
                     except Exception as exc:  # noqa: BLE001
+                        await state.set(f'oracle.{asset}.lag_seconds', 0)
                         logger.warning('chainlink_asset_error', asset=asset, error=str(exc))
             except Exception as exc:  # noqa: BLE001
                 await state.set('feed.chainlink.connected', False)

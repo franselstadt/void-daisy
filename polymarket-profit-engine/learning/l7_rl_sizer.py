@@ -1,13 +1,7 @@
-"""L7 RL-style position sizing adapter with Q-table.
+"""L7 RL position sizer with Q-table and epsilon-greedy policy.
 
-State space (10 bins each):
-  - win_rate_10: [0.0 .. 1.0]
-  - drawdown_pct: [0.0 .. 0.20]
-
-Action space (5 bins):
-  - size multiplier: [0.5, 0.7, 0.85, 1.0, 1.2]
-
-Epsilon-greedy policy with decaying epsilon.
+State: (win_rate_10 bin, drawdown_pct bin) — 10x10 grid
+Actions: [0.5, 0.7, 0.85, 1.0, 1.2] size multipliers
 """
 
 from __future__ import annotations
@@ -15,15 +9,24 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+from collections import defaultdict
 from pathlib import Path
 
 from core.config import config
-from core.event_bus import bus
 from core.state import state
 
-STATE_BINS = 10
-ACTION_BINS = 5
 ACTIONS = [0.5, 0.7, 0.85, 1.0, 1.2]
+N_BINS = 10
+
+
+def _bin(value: float, lo: float = 0.0, hi: float = 1.0) -> int:
+    return max(0, min(N_BINS - 1, int((value - lo) / max(hi - lo, 1e-9) * N_BINS)))
+
+
+def _state_key() -> str:
+    wr = _bin(float(state.get('stats.win_rate_10', 0.5)))
+    dd = _bin(float(state.get('stats.drawdown_pct', 0.0)), 0.0, 0.3)
+    return f'{wr}_{dd}'
 
 
 class L7RLSizer:
@@ -31,84 +34,64 @@ class L7RLSizer:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.discount = float(config.get('learning', 'l7_discount', default=0.95))
-        self.lr = 0.1
+        self.lr = 0.05
         self.epsilon = 0.15
-        self.q_table: dict[str, list[float]] = {}
-        self.multiplier = 1.0
-        self._last_state_key: str | None = None
-        self._last_action_idx: int | None = None
+        self.q_table: dict[str, list[float]] = defaultdict(lambda: [0.0] * len(ACTIONS))
+        self.last_state: str = ''
+        self.last_action_idx: int = 3
         self._load()
 
     def _load(self) -> None:
         if self.path.exists():
             try:
                 data = json.loads(self.path.read_text())
-                self.q_table = data.get('q_table', {})
-                self.epsilon = data.get('epsilon', 0.15)
-                self.multiplier = data.get('multiplier', 1.0)
-                return
+                if isinstance(data.get('q_table'), dict):
+                    for k, v in data['q_table'].items():
+                        self.q_table[k] = v
+                self.epsilon = float(data.get('epsilon', 0.15))
             except Exception:
                 pass
-        self.q_table = {}
-        self.epsilon = 0.15
-        self.multiplier = 1.0
 
     def _save(self) -> None:
-        self.path.write_text(json.dumps({
-            'q_table': self.q_table,
-            'epsilon': round(self.epsilon, 6),
-            'multiplier': round(self.multiplier, 4),
-        }, indent=2, sort_keys=True))
+        data = {
+            'q_table': dict(self.q_table),
+            'epsilon': self.epsilon,
+            'multiplier': ACTIONS[self.last_action_idx],
+        }
+        self.path.write_text(json.dumps(data, indent=2))
 
-    @staticmethod
-    def _discretize(win_rate_10: float, drawdown_pct: float) -> str:
-        wr_bin = min(STATE_BINS - 1, max(0, int(win_rate_10 * STATE_BINS)))
-        dd_bin = min(STATE_BINS - 1, max(0, int(drawdown_pct / 0.20 * STATE_BINS)))
-        return f'{wr_bin}_{dd_bin}'
-
-    def _get_q(self, key: str) -> list[float]:
-        if key not in self.q_table:
-            self.q_table[key] = [0.0] * ACTION_BINS
-        return self.q_table[key]
-
-    def _choose_action(self, key: str) -> int:
-        q = self._get_q(key)
+    def _select_action(self, sk: str) -> int:
         if random.random() < self.epsilon:
-            return random.randint(0, ACTION_BINS - 1)
-        return int(max(range(ACTION_BINS), key=lambda i: q[i]))
+            return random.randrange(len(ACTIONS))
+        q = self.q_table[sk]
+        return int(max(range(len(q)), key=lambda i: q[i]))
 
     async def on_trade_exit(self, event: dict) -> None:
-        reward = float(event.get('pnl_pct', 0.0))
         won = int(event.get('won', 0)) == 1
-        if not won:
-            reward = min(reward, -float(event.get('entry_price', 0.5)))
-
-        wr10 = float(state.get('stats.win_rate_10', 0.5))
+        entry_price = float(event.get('entry_price', 0.5))
+        pnl_pct = float(event.get('pnl_pct', 0.0))
         dd = float(state.get('stats.drawdown_pct', 0.0))
-        new_key = self._discretize(wr10, dd)
 
-        if self._last_state_key is not None and self._last_action_idx is not None:
-            old_q = self._get_q(self._last_state_key)
-            new_q = self._get_q(new_key)
-            best_next = max(new_q)
-            old_val = old_q[self._last_action_idx]
-            old_q[self._last_action_idx] = old_val + self.lr * (
-                reward + self.discount * best_next - old_val
-            )
+        reward = pnl_pct / max(abs(dd) + 0.01, 0.01) if won else -entry_price * 3
 
-        action_idx = self._choose_action(new_key)
-        self._last_state_key = new_key
-        self._last_action_idx = action_idx
-        self.multiplier = ACTIONS[action_idx]
+        sk = _state_key()
+        old_q = self.q_table[self.last_state]
+        new_q = self.q_table[sk]
+        best_next = max(new_q)
+        old_q[self.last_action_idx] += self.lr * (reward + self.discount * best_next - old_q[self.last_action_idx])
+
+        self.last_state = sk
+        self.last_action_idx = self._select_action(sk)
+        state.set_sync('learning.l7.rl_sizer.multiplier', ACTIONS[self.last_action_idx])
 
         self.epsilon = max(0.02, self.epsilon * 0.999)
-
-        state.set_sync('learning.l7.rl_sizer.multiplier', self.multiplier)
-        state.set_sync('learning.l7.rl_sizer.epsilon', self.epsilon)
+        self._save()
 
     async def run(self) -> None:
-        bus.subscribe('TRADE_EXITED', self.on_trade_exit)
         while True:
-            state.set_sync('learning.l7.rl_sizer.multiplier', self.multiplier)
+            sk = _state_key()
+            self.last_state = sk
+            self.last_action_idx = self._select_action(sk)
+            state.set_sync('learning.l7.rl_sizer.multiplier', ACTIONS[self.last_action_idx])
             self._save()
             await asyncio.sleep(120)

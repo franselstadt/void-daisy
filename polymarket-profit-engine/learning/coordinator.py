@@ -1,11 +1,13 @@
 """Coordinator for all 8 learning systems.
 
-Wiring:
-  TRADE_EXITED  → L1 (Bayesian), L4 (Bandit), L5 (Gradient), L7 (RL Sizer)
-  PRICE_TICK    → L2 (Kalman)
-  every ~60s    → L3 (HMM) via its own run loop
-  every ~3600s  → L8 (Calibrator) via its own run loop
-  every ~300s   → L5 batch gradient update via its own run loop
+Event wiring:
+  TRADE_EXITED → L1 (Bayesian), L4 (bandit), L5 (gradient), L7 (RL)
+  PRICE_TICK   → L2 (Kalman, every tick)
+  TRADE_EXITED → L6 (correlation, PLAN_03 trades only)
+  Every 60s    → L3 (HMM regime update)
+  Every 300s   → L5 gradient batch update
+  Every 3600s  → L8 (threshold calibration)
+  THOUGHT_TRAIN_COMPLETED → L8
 """
 
 from __future__ import annotations
@@ -33,7 +35,6 @@ class LearningCoordinator:
         self.l6 = L6Correlation()
         self.l7 = L7RLSizer()
         self.l8 = L8Calibrator()
-        self.systems = [self.l1, self.l2, self.l3, self.l4, self.l5, self.l6, self.l7, self.l8]
 
     def _wire_events(self) -> None:
         bus.subscribe('TRADE_EXITED', self.l1.on_exit)
@@ -46,4 +47,13 @@ class LearningCoordinator:
 
     async def run(self) -> None:
         self._wire_events()
-        await asyncio.gather(*[s.run() for s in self.systems])
+        await asyncio.gather(
+            self.l1.run(),
+            self.l2.run(),
+            self.l3.run(),
+            self.l4.run(),
+            self.l5.run(),
+            self.l6.run(),
+            self.l7.run(),
+            self.l8.run(),
+        )

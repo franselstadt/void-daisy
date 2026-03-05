@@ -1,13 +1,10 @@
-"""L2 Kalman smoother for price/velocity.
+"""L2 Kalman filter price/velocity tracker.
 
-State equation:  x(t) = F * x(t-1) + w     where w ~ N(0, Q)
-Measurement:     z(t) = H * x(t) + v        where v ~ N(0, R)
-
-State vector x = [price, velocity]^T
-F = [[1, dt], [0, 1]]
-H = [1, 0]
-Q = process_noise * I
-R = measurement_noise (scalar)
+Two-state model: [price, velocity]
+State equation:  x(t) = F*x(t-1) + w  (process noise)
+Measurement:     z(t) = H*x(t) + v    (measurement noise)
+F = [[1, dt], [0, 1]]  (constant velocity model)
+H = [1, 0]              (observe price only)
 """
 
 from __future__ import annotations
@@ -21,55 +18,66 @@ from core.config import config
 from core.state import state
 
 
-class L2Kalman:
-    def __init__(self) -> None:
-        self.process_noise = float(config.get('learning', 'l2_process_noise', default=0.001))
-        self.measurement_noise = float(config.get('learning', 'l2_measurement_noise', default=0.1))
-        self._filters: dict[str, dict] = {}
+class _AssetFilter:
+    def __init__(self, q: float, r: float) -> None:
+        self.x = np.array([0.0, 0.0])
+        self.P = np.eye(2) * 1000.0
+        self.Q_base = q
+        self.R = r
+        self.last_t = 0.0
+        self.initialized = False
 
-    def _init_filter(self, asset: str, price: float) -> dict:
-        return {
-            'x': np.array([price, 0.0]),
-            'P': np.eye(2) * 1.0,
-            'last_t': time.time(),
-        }
+    def update(self, price: float, ts: float) -> tuple[float, float]:
+        if not self.initialized:
+            self.x = np.array([price, 0.0])
+            self.P = np.eye(2) * 1.0
+            self.last_t = ts
+            self.initialized = True
+            return price, 0.0
 
-    def _predict_update(self, f: dict, z_price: float, now: float) -> tuple[float, float]:
-        dt = max(0.01, now - f['last_t'])
-        f['last_t'] = now
+        dt = max(0.001, ts - self.last_t)
+        self.last_t = ts
 
         F = np.array([[1.0, dt], [0.0, 1.0]])
         H = np.array([[1.0, 0.0]])
-        Q = self.process_noise * np.array([[dt**3 / 3, dt**2 / 2], [dt**2 / 2, dt]])
-        R = np.array([[self.measurement_noise]])
+        Q = np.array([[self.Q_base * dt, 0.0], [0.0, self.Q_base * dt]])
+        R = np.array([[self.R]])
 
-        x_pred = F @ f['x']
-        P_pred = F @ f['P'] @ F.T + Q
+        x_pred = F @ self.x
+        P_pred = F @ self.P @ F.T + Q
 
-        z = np.array([z_price])
-        y = z - H @ x_pred
+        y = np.array([price]) - H @ x_pred
         S = H @ P_pred @ H.T + R
         K = P_pred @ H.T @ np.linalg.inv(S)
 
-        f['x'] = x_pred + (K @ y).flatten()
-        f['P'] = (np.eye(2) - K @ H) @ P_pred
+        self.x = x_pred + (K @ y).flatten()
+        self.P = (np.eye(2) - K @ H) @ P_pred
 
-        return float(f['x'][0]), float(f['x'][1])
+        return float(self.x[0]), float(self.x[1])
+
+
+class L2Kalman:
+    def __init__(self) -> None:
+        q = float(config.get('learning', 'l2_process_noise', default=0.001))
+        r = float(config.get('learning', 'l2_measurement_noise', default=0.1))
+        self.filters: dict[str, _AssetFilter] = {
+            a: _AssetFilter(q, r) for a in ('BTC', 'ETH', 'SOL', 'XRP')
+        }
 
     async def on_tick(self, event: dict) -> None:
-        a = event['asset']
-        p = float(event['price'])
-        now = float(event.get('timestamp', time.time()))
-
-        if a not in self._filters:
-            self._filters[a] = self._init_filter(a, p)
-
-        kalman_price, kalman_velocity = self._predict_update(self._filters[a], p, now)
-
-        state.set_sync(f'learning.l2.kalman.{a}.x_price', kalman_price)
-        state.set_sync(f'learning.l2.kalman.{a}.x_velocity', kalman_velocity)
-        state.set_sync(f'price.{a}.kalman_price', kalman_price)
-        state.set_sync(f'price.{a}.kalman_velocity', kalman_velocity)
+        asset = event.get('asset', '')
+        filt = self.filters.get(asset)
+        if not filt:
+            return
+        price = float(event.get('price', 0.0))
+        ts = float(event.get('timestamp', time.time()))
+        if price <= 0:
+            return
+        kp, kv = filt.update(price, ts)
+        state.set_sync(f'learning.l2.kalman.{asset}.x_price', kp)
+        state.set_sync(f'learning.l2.kalman.{asset}.x_velocity', kv)
+        state.set_sync(f'price.{asset}.kalman_price', kp)
+        state.set_sync(f'price.{asset}.kalman_velocity', kv)
 
     async def run(self) -> None:
         while True:
