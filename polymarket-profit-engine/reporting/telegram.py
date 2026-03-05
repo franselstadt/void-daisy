@@ -241,6 +241,26 @@ class TelegramReporter:
         Path('data/signal_weights.json').write_text(target.read_text())
         await update.message.reply_text(f'Rolled back weights to {target.name}')
 
+    async def cmd_disable(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            return
+        if not context.args:
+            await update.message.reply_text('Usage: /disable PLAN_01')
+            return
+        plan = context.args[0].upper()
+        state.set_sync(f'plan.{plan}.disabled', True)
+        await update.message.reply_text(f'🚫 {plan} disabled.')
+
+    async def cmd_enable(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            return
+        if not context.args:
+            await update.message.reply_text('Usage: /enable PLAN_01')
+            return
+        plan = context.args[0].upper()
+        state.set_sync(f'plan.{plan}.disabled', False)
+        await update.message.reply_text(f'✅ {plan} enabled.')
+
     async def cmd_paper_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return
@@ -295,6 +315,7 @@ class TelegramReporter:
             ('signals', self.cmd_signals), ('learning', self.cmd_learning),
             ('thought_train', self.cmd_thought_train),
             ('pause', self.cmd_pause), ('resume', self.cmd_resume),
+            ('disable', self.cmd_disable), ('enable', self.cmd_enable),
             ('emergency_stop', self.cmd_emergency),
             ('config', self.cmd_config), ('rollback', self.cmd_rollback),
             ('paper_on', self.cmd_paper_on), ('paper_off', self.cmd_paper_off),
