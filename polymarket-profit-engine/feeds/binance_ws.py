@@ -3,191 +3,169 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from collections import deque
 from dataclasses import dataclass, field
 
+import ujson
 import websockets
 
 from core.event_bus import bus
-from core.logger import logger
+from loguru import logger
 from core.state import state
 
-STREAMS = {
-    "BTC": "wss://stream.binance.com:9443/ws/btcusdt@trade",
-    "ETH": "wss://stream.binance.com:9443/ws/ethusdt@trade",
-    "SOL": "wss://stream.binance.com:9443/ws/solusdt@trade",
-    "XRP": "wss://stream.binance.com:9443/ws/xrpusdt@trade",
+ASSETS = {
+    "BTC": "btcusdt@trade",
+    "ETH": "ethusdt@trade",
+    "SOL": "solusdt@trade",
+    "XRP": "xrpusdt@trade",
 }
+WS = "wss://stream.binance.com:9443/ws"
 
 
 @dataclass
 class AssetBuffer:
-    prices: deque[float] = field(default_factory=lambda: deque(maxlen=1000))
-    volumes: deque[float] = field(default_factory=lambda: deque(maxlen=1000))
-    timestamps: deque[float] = field(default_factory=lambda: deque(maxlen=1000))
-    sides: deque[str] = field(default_factory=lambda: deque(maxlen=1000))
-    accelerations: deque[float] = field(default_factory=lambda: deque(maxlen=1000))
+    prices: deque = field(default_factory=lambda: deque(maxlen=2000))
+    volumes: deque = field(default_factory=lambda: deque(maxlen=2000))
+    times: deque = field(default_factory=lambda: deque(maxlen=2000))
+    sides: deque = field(default_factory=lambda: deque(maxlen=2000))
+    _vwap_pv: float = 0.0
+    _vwap_v: float = 0.0
 
-    def add(self, price: float, volume: float, ts: float, side: str) -> None:
+    def push(self, price: float, volume: float, ts: float, side: str) -> None:
         self.prices.append(price)
         self.volumes.append(volume)
-        self.timestamps.append(ts)
+        self.times.append(ts)
         self.sides.append(side)
+        self._vwap_pv += price * volume
+        self._vwap_v += volume
+        if len(self.prices) % 10000 == 0:
+            self._vwap_pv = price * volume
+            self._vwap_v = volume
 
-    def _price_ago(self, secs: float) -> float:
-        if not self.timestamps:
+    def vel(self, secs: int) -> float:
+        if len(self.times) < 2:
             return 0.0
-        tgt = self.timestamps[-1] - secs
-        for i in range(len(self.timestamps) - 1, -1, -1):
-            if self.timestamps[i] <= tgt:
-                return self.prices[i]
-        return self.prices[0]
+        now = self.times[-1]
+        olds = [p for p, t in zip(self.prices, self.times) if t >= now - secs]
+        return (self.prices[-1] - olds[0]) / secs if olds else 0.0
 
-    def _avg_vol(self, secs: float) -> float:
-        if not self.timestamps:
-            return 0.0
-        cutoff = self.timestamps[-1] - secs
-        vals = [v for v, t in zip(self.volumes, self.timestamps) if t >= cutoff]
-        return sum(vals) / len(vals) if vals else 0.0
+    def vol_ratio(self, short: int = 10, long: int = 60) -> float:
+        now = self.times[-1] if self.times else 0
+        sv = [v for v, t in zip(self.volumes, self.times) if t >= now - short]
+        lv = [v for v, t in zip(self.volumes, self.times) if t >= now - long]
+        if not lv or not sv:
+            return 1.0
+        return (sum(sv) / len(sv)) / (sum(lv) / len(lv))
 
-    def _rsi_14(self) -> float:
-        if len(self.prices) < 15:
+    def buy_pct(self, secs: int = 30) -> float:
+        now = self.times[-1] if self.times else 0
+        r = [s for s, t in zip(self.sides, self.times) if t >= now - secs]
+        return sum(1 for s in r if s == "BUY") / len(r) if r else 0.5
+
+    def rsi(self, period: int = 14) -> float:
+        if len(self.prices) < period * 2:
             return 50.0
-        gains = 0.0
-        losses = 0.0
-        for i in range(-14, 0):
-            d = self.prices[i] - self.prices[i - 1]
-            if d > 0:
-                gains += d
-            else:
-                losses += abs(d)
-        ag = gains / 14
-        al = losses / 14 if losses else 1e-9
-        rs = ag / al
-        return 100 - (100 / (1 + rs))
+        px = list(self.prices)[-(period * 2):]
+        g = [max(0, px[i] - px[i - 1]) for i in range(1, len(px))]
+        l = [max(0, px[i - 1] - px[i]) for i in range(1, len(px))]
+        ag = sum(g[-period:]) / period
+        al = sum(l[-period:]) / period
+        return 100 - (100 / (1 + ag / al)) if al > 0 else 100.0
 
-    def _buy_pct(self, secs: float = 30) -> float:
-        if not self.timestamps:
-            return 0.5
-        cutoff = self.timestamps[-1] - secs
-        sides = [s for s, t in zip(self.sides, self.timestamps) if t >= cutoff]
-        if not sides:
-            return 0.5
-        return sum(1 for s in sides if s == 'BUY') / len(sides)
+    def vwap(self) -> float:
+        return self._vwap_pv / self._vwap_v if self._vwap_v else 0.0
 
-    def _vwap(self, secs: float = 1800) -> float:
-        if not self.timestamps:
-            return 0.0
-        cutoff = self.timestamps[-1] - secs
-        pv = [(p * v, v) for p, v, t in zip(self.prices, self.volumes, self.timestamps) if t >= cutoff]
-        tv = sum(v for _, v in pv)
-        if tv <= 0:
-            return self.prices[-1]
-        return sum(x for x, _ in pv) / tv
-
-    def _consecutive(self) -> int:
-        if not self.sides:
+    def consec(self) -> int:
+        if len(self.prices) < 2:
             return 0
-        last = self.sides[-1]
-        c = 0
-        for s in reversed(self.sides):
-            if s != last:
+        px = list(self.prices)[-50:]
+        direction = 1 if px[-1] > px[-2] else -1
+        count = 0
+        for i in range(len(px) - 1, 0, -1):
+            d = 1 if px[i] > px[i - 1] else -1
+            if d == direction:
+                count += direction
+            else:
                 break
-            c += 1
-        return c if last == 'BUY' else -c
-
-    def metrics(self) -> dict[str, float]:
-        if len(self.prices) < 3:
-            return {
-                'velocity_10s': 0.0, 'velocity_30s': 0.0, 'velocity_60s': 0.0, 'velocity_300s': 0.0,
-                'acceleration': 0.0, 'jerk': 0.0, 'volume_ratio_10_60': 1.0, 'volume_ratio_60_300': 1.0,
-                'buy_volume_pct': 0.5, 'rsi_14': 50.0, 'vwap_deviation': 0.0, 'consecutive_direction': 0,
-                'pct_change_60s': 0.0,
-            }
-        p = self.prices[-1]
-        p10 = self._price_ago(10)
-        p30 = self._price_ago(30)
-        p60 = self._price_ago(60)
-        p300 = self._price_ago(300)
-        v10 = (p - p10) / 10 if p10 else 0.0
-        v30 = (p - p30) / 30 if p30 else 0.0
-        v60 = (p - p60) / 60 if p60 else 0.0
-        v300 = (p - p300) / 300 if p300 else 0.0
-        accel = v10 - v30
-        self.accelerations.append(accel)
-        jerk = accel - self.accelerations[-6] if len(self.accelerations) > 6 else 0.0
-        vol10 = self._avg_vol(10)
-        vol60 = self._avg_vol(60)
-        vol300 = self._avg_vol(300)
-        vwap = self._vwap(1800)
-        return {
-            'velocity_10s': v10,
-            'velocity_30s': v30,
-            'velocity_60s': v60,
-            'velocity_300s': v300,
-            'acceleration': accel,
-            'jerk': jerk,
-            'volume_ratio_10_60': vol10 / vol60 if vol60 else 1.0,
-            'volume_ratio_60_300': vol60 / vol300 if vol300 else 1.0,
-            'buy_volume_pct': self._buy_pct(30),
-            'rsi_14': self._rsi_14(),
-            'vwap_deviation': ((p - vwap) / vwap) if vwap else 0.0,
-            'consecutive_direction': self._consecutive(),
-            'pct_change_60s': ((p - p60) / p60) if p60 else 0.0,
-        }
+        return count
 
 
-class BinanceFeed:
-    def __init__(self) -> None:
-        self.buffers = {a: AssetBuffer() for a in STREAMS}
+bufs = {a: AssetBuffer() for a in ASSETS}
 
-    async def _run_asset(self, asset: str, url: str) -> None:
-        backoff = 0.1
-        while True:
-            try:
-                async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
-                    await state.set(f'feed.binance.{asset}.connected', True)
-                    await state.set(f'feed.binance.{asset}.last_tick', time.time())
-                    await bus.publish('FEED_RECONNECTED', {'feed': 'binance', 'asset': asset})
-                    backoff = 0.1
-                    async for raw in ws:
-                        data = json.loads(raw)
-                        px = float(data.get('p', 0.0))
-                        vol = float(data.get('q', 0.0))
-                        ts = float(data.get('T', int(time.time() * 1000))) / 1000
-                        side = 'SELL' if data.get('m', False) else 'BUY'
 
-                        buf = self.buffers[asset]
-                        buf.add(px, vol, ts, side)
-                        m = buf.metrics()
+async def _stream(asset: str, sym: str) -> None:
+    delay = 0.1
+    while True:
+        try:
+            async with websockets.connect(
+                f"{WS}/{sym}",
+                ping_interval=20, ping_timeout=10,
+                close_timeout=5, max_size=2**20,
+            ) as ws:
+                delay = 0.1
+                await state.set(f"feed.binance.{asset}.connected", True)
+                logger.info(f"Binance {asset} connected")
+                async for msg in ws:
+                    d = ujson.loads(msg)
+                    price = float(d["p"])
+                    vol = float(d["q"])
+                    ts = d["T"] / 1000.0
+                    side = "BUY" if not d["m"] else "SELL"
 
-                        await state.set(f'price.{asset}.price', px)
-                        await state.set(f'price.{asset}.timestamp', ts)
-                        for k, v in m.items():
-                            await state.set(f'price.{asset}.{k}', v)
-                        await state.set(f'feed.binance.{asset}.last_tick', time.time())
-                        state.append_list(f'history.{asset}.velocity_60s', float(m['velocity_60s']), maxlen=1800)
+                    buf = bufs[asset]
+                    buf.push(price, vol, ts, side)
 
-                        payload = {'asset': asset, 'price': px, 'volume': vol, 'timestamp': ts, 'side': side, **m}
-                        await bus.publish('PRICE_TICK', payload)
-                        if abs(float(m['pct_change_60s'])) > 0.003:
-                            await bus.publish('MAJOR_MOVE', payload)
-                        if float(m['volume_ratio_10_60']) > 3.0:
-                            await bus.publish('VOLUME_SPIKE', payload)
-                        if abs(float(m['acceleration'])) > 0.0004 and (float(m['acceleration']) * float(m['velocity_30s'])) < 0:
-                            await bus.publish('VELOCITY_REVERSAL', payload)
-            except Exception as exc:  # noqa: BLE001
-                await state.set(f'feed.binance.{asset}.connected', False)
-                await bus.publish('FEED_DISCONNECTED', {'feed': 'binance', 'asset': asset, 'error': str(exc)})
-                logger.warning('binance_reconnect', asset=asset, sleep=backoff, error=str(exc))
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 5.0)
+                    v10 = buf.vel(10)
+                    v30 = buf.vel(30)
+                    v60 = buf.vel(60)
+                    v300 = buf.vel(300)
+                    vwap_val = buf.vwap()
 
-    async def run(self) -> None:
-        await asyncio.gather(*[self._run_asset(a, u) for a, u in STREAMS.items()])
+                    k = state.get(f"learning.l2.kalman.{asset}", {}) or {}
+
+                    tick = {
+                        "asset": asset,
+                        "price": price,
+                        "velocity_10s": v10,
+                        "velocity_30s": v30,
+                        "velocity_60s": v60,
+                        "velocity_300s": v300,
+                        "acceleration": v10 - v30,
+                        "jerk": (v10 - v30) - float(state.get(f"price.{asset}.acceleration", 0)),
+                        "volume_ratio_10_60": buf.vol_ratio(10, 60),
+                        "volume_ratio_60_300": buf.vol_ratio(60, 300),
+                        "buy_volume_pct": buf.buy_pct(30),
+                        "rsi_14": buf.rsi(),
+                        "vwap_deviation": (price - vwap_val) / vwap_val if vwap_val else 0,
+                        "consecutive_direction": buf.consec(),
+                        "kalman_price": k.get("x_price", price) if isinstance(k, dict) else price,
+                        "kalman_velocity": k.get("x_velocity", v30) if isinstance(k, dict) else v30,
+                        "timestamp": ts,
+                    }
+
+                    state.set_sync(f"price.{asset}", tick)
+                    await state.set(f"feed.binance.{asset}.last_tick", ts)
+                    await bus.publish("PRICE_TICK", tick)
+
+                    state.append_list(f"history.{asset}.velocity_60s", float(v60), maxlen=1800)
+
+                    pct = v60 * 60 / price if price else 0
+                    if abs(pct) > 0.003:
+                        await bus.publish("MAJOR_MOVE", {
+                            **tick, "pct_change": pct,
+                            "direction": "UP" if v60 > 0 else "DOWN",
+                        })
+
+                    if buf.vol_ratio(10, 60) > 3.0:
+                        await bus.publish("VOLUME_SPIKE", tick)
+
+        except Exception as e:
+            await state.set(f"feed.binance.{asset}.connected", False)
+            logger.warning(f"Binance {asset} dropped: {e} — retry in {delay}s")
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 5.0)
 
 
 async def start_binance_feeds() -> None:
-    await BinanceFeed().run()
+    await asyncio.gather(*[_stream(a, s) for a, s in ASSETS.items()])

@@ -15,7 +15,7 @@ def check(opp: dict) -> tuple[bool, str]:
     if state.get('bot.paused', False):
         return False, 'PAUSED'
     bankroll = float(state.get('stats.bankroll', state.get('bankroll', 0.0)))
-    if bankroll <= 10:
+    if bankroll < 10:
         return False, 'BANKROLL_CRITICAL'
 
     level = int(state.get('bot.degradation_level', state.get('degradation_level', 0)))
@@ -32,9 +32,9 @@ def check(opp: dict) -> tuple[bool, str]:
     if open_exp + float(opp.get('bet_size', 0.0)) > bankroll * 0.40:
         return False, 'EXPOSURE_LIMIT'
 
-    if float(opp.get('confidence', 0.0)) < (float(config.get('trading.min_confidence', 0.62)) + (0.03 * level)):
+    if float(opp.get('confidence', 0.0)) < (float(config.get('trading', 'min_confidence', default=0.62)) + (0.03 * level)):
         return False, 'CONFIDENCE_LOW'
-    if float(opp.get('exhaustion_score', 0.0)) < (float(config.get('trading.min_exhaustion', 3.5)) + (0.3 * level)):
+    if float(opp.get('exhaustion_score', 0.0)) < (float(config.get('trading', 'min_exhaustion', default=3.5)) + (0.3 * level)):
         return False, 'EXHAUSTION_LOW'
 
     if asset == 'XRP' and state.get('xrp.news_blackout_active', False):

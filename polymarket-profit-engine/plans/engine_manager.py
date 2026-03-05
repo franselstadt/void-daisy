@@ -39,6 +39,24 @@ class EngineManager:
         order_imb = imbalance(bid, ask)
         whale = whale_detected(float(event.get('orderbook', {}).get('largest_order', 0.0) or 0.0), bid + ask)
 
+        v10 = float(state.get(f'price.{asset}.velocity_10s', 0.0))
+        v30 = float(state.get(f'price.{asset}.velocity_30s', 0.0))
+        v60 = float(state.get(f'price.{asset}.velocity_60s', 0.0))
+        btc_v30 = float(state.get('price.BTC.velocity_30s', 0.0))
+        accel = float(state.get(f'price.{asset}.acceleration', 0.0))
+        consecutive = int(state.get(f'price.{asset}.consecutive_direction', 0))
+        spot = float(state.get(f'price.{asset}.price', 0.0))
+        rsi = float(state.get(f'price.{asset}.rsi_14', 50.0))
+
+        direction = 'UP' if v30 > 0 else 'DOWN' if v30 < 0 else 'FLAT'
+        prev_bid = float(state.get(f'polymarket.prev.{asset}.bid_depth', bid))
+        bid_depth_delta = bid - prev_bid
+        round_number = round(spot / 1000) * 1000 if spot > 100 else round(spot, 1)
+        round_prox = abs(spot - round_number) / max(spot, 1e-9) < 0.01 if spot > 0 else False
+        btc_led = abs(btc_v30) > abs(v30) * 1.5 and ((btc_v30 > 0 and v30 >= 0) or (btc_v30 < 0 and v30 <= 0))
+        xasset_div = abs(v30 - btc_v30 * 0.5) if btc_v30 != 0 else 0.0
+        candles = abs(consecutive)
+
         ctx = {
             'asset': asset,
             'yes_price': float(event.get('yes_price', 0.5)),
@@ -51,14 +69,16 @@ class EngineManager:
             'market_id': str(event.get('market_id', '')),
             'token_id': str(event.get('token_id', '')),
             'timestamp': float(event.get('timestamp', time.time())),
-            'v10': float(state.get(f'price.{asset}.velocity_10s', 0.0)),
-            'v30': float(state.get(f'price.{asset}.velocity_30s', 0.0)),
-            'v60': float(state.get(f'price.{asset}.velocity_60s', 0.0)),
-            'btc_v30': float(state.get('price.BTC.velocity_30s', 0.0)),
-            'accel': float(state.get(f'price.{asset}.acceleration', 0.0)),
+            'v10': v10,
+            'v30': v30,
+            'v60': v60,
+            'v300': float(state.get(f'price.{asset}.velocity_300s', 0.0)),
+            'btc_v30': btc_v30,
+            'accel': accel,
             'vol_ratio': float(state.get(f'price.{asset}.volume_ratio_10_60', 1.0)),
+            'vol_ratio_60_300': float(state.get(f'price.{asset}.volume_ratio_60_300', 1.0)),
             'buy_pct': float(state.get(f'price.{asset}.buy_volume_pct', 0.5)),
-            'rsi': float(state.get(f'price.{asset}.rsi_14', 50.0)),
+            'rsi': rsi,
             'vwap_dev': float(state.get(f'price.{asset}.vwap_deviation', 0.0)),
             'oracle_lag': float(state.get(f'oracle.{asset}.lag_seconds', 0.0)),
             'oracle_delta': float(state.get(f'oracle.{asset}.delta_pct', 0.0)),
@@ -66,7 +86,18 @@ class EngineManager:
             'regime': str(state.get('bot.current_regime', 'RANGING')),
             'order_imbalance': order_imb,
             'whale': whale,
-            'cross_asset_ok': abs(float(state.get(f'price.{asset}.velocity_30s', 0.0))) > 0 and abs(float(state.get('price.BTC.velocity_30s', 0.0))) > 0,
+            'direction': direction,
+            'bid_depth_delta': bid_depth_delta,
+            'round_prox': round_prox,
+            'btc_led': btc_led,
+            'xasset_div': xasset_div,
+            'candles': candles,
+            'consecutive_direction': consecutive,
+            'kalman_price': float(state.get(f'price.{asset}.kalman_price', spot)),
+            'kalman_velocity': float(state.get(f'price.{asset}.kalman_velocity', v30)),
+            'cross_asset_ok': abs(v30) > 0 and abs(btc_v30) > 0,
+            'correlation_lag': float(state.get(f'correlation.lag.{asset}', 10.0)),
+            'correlation_strength': float(state.get(f'correlation.strength.{asset}', 0.7)),
         }
         ex = exhaustion_engine.score(ctx)
         ctx['exhaustion_score'] = ex['score']
@@ -108,10 +139,13 @@ class EngineManager:
     async def on_poly_tick(self, event: dict) -> None:
         try:
             ctx = self._context(event)
-            for opp in self.evaluate_all(ctx, relax_threshold=False):
+            opps = self.evaluate_all(ctx, relax_threshold=False)
+            if not opps:
+                opps = self.evaluate_all(ctx, relax_threshold=True)
+            for opp in opps:
                 await bus.publish('OPPORTUNITY_DETECTED', opp)
-            # update prev tick snapshot
             state.set_sync(f'polymarket.prev.{event["asset"]}.spread', float(event.get('spread', 0.0)))
+            state.set_sync(f'polymarket.prev.{event["asset"]}.bid_depth', float(event.get('orderbook', {}).get('bids_volume', 0.0) or 0.0))
         except Exception as exc:  # noqa: BLE001
             logger.warning('engine_manager_error', error=str(exc))
 

@@ -123,26 +123,91 @@ async def log_trade(row: dict, path: str = "data/trades.db") -> None:
 async def hourly_report(reporter: TelegramReporter) -> None:
     while True:
         await asyncio.sleep(3600)
+        bankroll = float(state.get('stats.bankroll', state.get('bankroll', 0.0)))
+        pnl_hour = float(state.get("stats.pnl_this_hour", 0.0))
+        pnl_session = float(state.get("stats.pnl_session", 0.0))
+        wr10 = float(state.get("stats.win_rate_10", 0.5))
+        wr20 = float(state.get("stats.win_rate_20", 0.5))
+        dd = float(state.get("stats.drawdown_pct", 0.0))
+        trades = int(state.get("stats.trades_this_session", 0))
+        level = int(state.get("bot.degradation_level", 0))
+        mode = LEVELS.get(level, {}).get("name", "NORMAL")
+        regime = state.get("bot.current_regime", "RANGING")
+        paper = "PAPER" if state.get("bot.paper_mode", True) else "LIVE"
+        tt_active = "YES" if state.get("bot.thought_train_active", False) else "no"
+
         lines = [f"🦞 HOURLY REPORT — {datetime.now(timezone.utc).strftime('%H:%M UTC')}"]
+        lines.append(f"Mode: {paper} | {mode} (L{level}) | Regime: {regime}")
+        lines.append(f"Bankroll: ${bankroll:.2f} | Drawdown: {dd:.1%}")
+        lines.append(f"PnL: hour ${pnl_hour:+.2f} | session ${pnl_session:+.2f}")
+        lines.append(f"Win Rate: {wr10:.0%} (10) | {wr20:.0%} (20) | Trades: {trades}")
+        lines.append(f"Thought Train: {tt_active}")
         for asset in ["BTC", "ETH", "SOL", "XRP"]:
-            lines.append(
-                f"{asset} | coverage {int(state.get(f'coverage.window_covered.{asset}', 0))}/"
-                f"{int(state.get(f'coverage.window_total.{asset}', 0))}"
-            )
-        lines.append(f"Bankroll: ${float(state.get('stats.bankroll', state.get('bankroll', 0.0))):.2f}")
-        mode = LEVELS.get(int(state.get("bot.degradation_level", 0)), {}).get("name", "NORMAL")
-        lines.append(f"Regime: {state.get('bot.current_regime', 'RANGING')} | Mode: {mode}")
+            covered = int(state.get(f'coverage.window_covered.{asset}', 0))
+            total = int(state.get(f'coverage.window_total.{asset}', 0))
+            pct = f"{covered/total*100:.0f}%" if total else "0%"
+            lines.append(f"  {asset} coverage {pct} ({covered}/{total})")
         await reporter.send("\n".join(lines))
         state.set_sync("stats.pnl_this_hour", 0.0)
+
+
+def _ensure_data_files() -> None:
+    """Create default data files if missing — required for cold starts."""
+    import json as _json
+    from pathlib import Path as _P
+    _P("data/versions").mkdir(parents=True, exist_ok=True)
+    _P("logs").mkdir(parents=True, exist_ok=True)
+    defaults = {
+        "data/config.json": {"version": 1},
+        "data/signal_weights.json": {},
+        "data/bayesian_beliefs.json": {},
+        "data/bandit_state.json": {},
+        "data/rl_sizer_state.json": {"q_table": {}, "epsilon": 0.1, "multiplier": 1.0},
+        "data/correlation_state.json": {
+            "lag": {"ETH": 8.0, "SOL": 12.0, "XRP": 15.0},
+            "strength": {"ETH": 0.8, "SOL": 0.75, "XRP": 0.6},
+        },
+    }
+    for path, default in defaults.items():
+        p = _P(path)
+        if not p.exists():
+            p.write_text(_json.dumps(default, indent=2))
+
+
+def _load_persistent_state() -> None:
+    """Reload persisted learning state from data/*.json into state."""
+    import json as _json
+    from pathlib import Path as _P
+    try:
+        data = _json.loads(_P("data/correlation_state.json").read_text())
+        for asset in ["ETH", "SOL", "XRP"]:
+            state.set_sync(f"correlation.lag.{asset}", float(data.get("lag", {}).get(asset, 10.0)))
+            state.set_sync(f"correlation.strength.{asset}", float(data.get("strength", {}).get(asset, 0.7)))
+    except Exception:
+        pass
+    try:
+        beliefs = _json.loads(_P("data/bayesian_beliefs.json").read_text())
+        if beliefs:
+            state.set_sync("learning.l1.beliefs", beliefs)
+    except Exception:
+        pass
+    try:
+        rl = _json.loads(_P("data/rl_sizer_state.json").read_text())
+        state.set_sync("learning.l7.rl_sizer.multiplier", float(rl.get("multiplier", 1.0)))
+    except Exception:
+        pass
 
 
 async def main() -> None:
     load_dotenv()
     os.chdir(os.path.dirname(__file__) or ".")
     setup_logging()
+
+    _ensure_data_files()
     config.start()
     await init_database()
 
+    _load_persistent_state()
     start_bankroll = float(os.getenv("STARTING_BANKROLL", "200.0"))
     state.set_sync("stats.bankroll", start_bankroll)
     state.set_sync("bankroll", start_bankroll)
@@ -204,12 +269,13 @@ async def main() -> None:
             state.set_sync("stats.opportunities_taken", int(state.get("stats.opportunities_taken", 0)) + 1)
 
     async def on_exit_request(req: dict) -> None:
+        req['bankroll_before_exit'] = float(state.get('stats.bankroll', state.get('bankroll', 0.0)))
         await executor.exit_trade(req)
 
     async def on_trade_exited(evt: dict) -> None:
         row = dict(evt)
         row["timestamp"] = datetime.now(timezone.utc).isoformat()
-        row["bankroll_at_entry"] = float(state.get("stats.bankroll", 0.0))
+        row["bankroll_at_entry"] = float(evt.get("bankroll_before_exit", state.get("stats.bankroll", 0.0)))
         row["win_rate_10_at_entry"] = float(state.get("stats.win_rate_10", 0.5))
         row["consecutive_losses_at_entry"] = int(state.get("stats.consecutive_losses", 0))
         row["regime_at_entry"] = state.get("bot.current_regime", "RANGING")
@@ -237,7 +303,9 @@ async def main() -> None:
     bus.subscribe("TRADE_EXIT_REQUEST", on_exit_request)
     bus.subscribe("TRADE_EXITED", on_trade_exited)
 
-    await asyncio.gather(
+    from core.logger import logger as _log
+
+    tasks = [
         bus.run(),
         start_binance_feeds(),
         PolymarketFeed().run(),
@@ -253,7 +321,11 @@ async def main() -> None:
         CorrelationTracker().run(),
         reporter.run(),
         hourly_report(reporter),
-    )
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for i, r in enumerate(results):
+        if isinstance(r, Exception):
+            _log.error('task_failed', task_index=i, error=str(r))
 
 
 if __name__ == "__main__":
