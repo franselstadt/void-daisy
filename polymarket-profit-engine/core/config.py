@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import ujson
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -108,7 +108,7 @@ class Config:
     def reload(self) -> None:
         with self._lock:
             try:
-                self._cfg = json.loads(self.path.read_text())
+                self._cfg = ujson.loads(self.path.read_text())
             except Exception:
                 self._cfg = DEFAULT
 
@@ -120,10 +120,9 @@ class Config:
         self._obs.start()
         logger.info('config_watch_started', path=str(self.path))
 
-    def get(self, key: str, default: Any = None) -> Any:
-        parts = key.split('.')
+    def get(self, *keys: str, default: Any = None) -> Any:
         d: Any = self._cfg
-        for p in parts:
+        for p in keys:
             if not isinstance(d, dict) or p not in d:
                 return default
             d = d[p]
@@ -136,11 +135,12 @@ class Config:
                     self._cfg[k].update(v)
                 else:
                     self._cfg[k] = v
+            self._cfg["version"] = self._cfg.get("version", 0) + 1
             self.save()
 
     def save(self) -> None:
         with self._lock:
-            self.path.write_text(json.dumps(self._cfg, indent=2, sort_keys=True))
+            self.path.write_text(ujson.dumps(self._cfg, indent=2, sort_keys=True))
 
 
 config = Config()

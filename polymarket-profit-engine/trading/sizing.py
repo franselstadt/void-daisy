@@ -20,8 +20,9 @@ def calculate_bet_size(bankroll: float, entry_price: float, confidence: float, w
     loss_mult = max(0.35, 1.0 - (consecutive_losses * 0.15))
     asset_mult = {'BTC': 1.0, 'ETH': 1.1, 'SOL': 1.2, 'XRP': 0.85}.get(asset, 1.0)
     deg_mult = {0: 1.0, 1: 0.70, 2: 0.45, 3: 0.25}.get(degradation_level, 1.0)
+    rl_mult = float(state.get('learning.l7.rl_sizer.multiplier', 1.0))
 
-    raw = bankroll * kelly * plan_mult * conf_mult * perf_mult * loss_mult * asset_mult * deg_mult
+    raw = bankroll * kelly * plan_mult * conf_mult * perf_mult * loss_mult * asset_mult * deg_mult * rl_mult
 
     min_bet = 1.0
     max_bet = bankroll * 0.15

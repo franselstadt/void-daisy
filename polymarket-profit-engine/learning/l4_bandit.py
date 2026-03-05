@@ -17,7 +17,7 @@ class L4Bandit:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.data = self._load()
-        self.ucb_c = float(config.get('learning.l4_ucb_c', 1.41))
+        self.ucb_c = float(config.get('learning', 'l4_ucb_c', default=1.41))
 
     def _load(self) -> dict:
         if self.path.exists():

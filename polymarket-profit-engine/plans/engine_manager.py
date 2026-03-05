@@ -139,7 +139,10 @@ class EngineManager:
     async def on_poly_tick(self, event: dict) -> None:
         try:
             ctx = self._context(event)
-            for opp in self.evaluate_all(ctx, relax_threshold=False):
+            opps = self.evaluate_all(ctx, relax_threshold=False)
+            if not opps:
+                opps = self.evaluate_all(ctx, relax_threshold=True)
+            for opp in opps:
                 await bus.publish('OPPORTUNITY_DETECTED', opp)
             state.set_sync(f'polymarket.prev.{event["asset"]}.spread', float(event.get('spread', 0.0)))
             state.set_sync(f'polymarket.prev.{event["asset"]}.bid_depth', float(event.get('orderbook', {}).get('bids_volume', 0.0) or 0.0))

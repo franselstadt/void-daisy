@@ -45,7 +45,7 @@ class L6Correlation:
 
     async def run(self) -> None:
         bus.subscribe('TRADE_EXITED', self.on_trade_exit)
-        halflife_hours = float(config.get('learning.l6_halflife_hours', 4))
+        halflife_hours = float(config.get('learning', 'l6_halflife_hours', default=4))
         halflife = halflife_hours * 3600
         interval = 60
         while True:

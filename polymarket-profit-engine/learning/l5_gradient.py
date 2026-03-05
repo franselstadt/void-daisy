@@ -16,8 +16,8 @@ class L5Gradient:
     def __init__(self, path: str = 'data/signal_weights.json') -> None:
         self.path = Path(path)
         self.trades: deque[dict] = deque(maxlen=100)
-        self.lr = float(config.get('learning.l5_learning_rate', 0.01))
-        self.max_change = float(config.get('learning.l5_max_weight_change', 0.20))
+        self.lr = float(config.get('learning', 'l5_learning_rate', default=0.01))
+        self.max_change = float(config.get('learning', 'l5_max_weight_change', default=0.20))
         self.last_loss = float('inf')
 
     async def on_exit(self, event: dict) -> None:

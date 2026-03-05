@@ -8,6 +8,7 @@ import random
 import time
 from dataclasses import dataclass
 
+from core.config import config
 from core.event_bus import bus
 from core.logger import logger
 from core.state import state
@@ -46,12 +47,67 @@ class Executor:
         await asyncio.sleep(0)
         return Result(True, max(0.01, px + random.uniform(-0.002, 0.002)), True, f'paper-{int(time.time() * 1000)}')
 
-    async def _live_fill(self, px: float) -> Result:
+    def _rotate_proxy(self) -> None:
+        host = os.getenv('PROXY_HOST', '')
+        port = os.getenv('PROXY_PORT', '')
+        user = os.getenv('PROXY_USER', '')
+        pw = os.getenv('PROXY_PASS', '')
+        if host and port:
+            proxy_url = f'http://{user}:{pw}@{host}:{port}' if user else f'http://{host}:{port}'
+            if self._client and hasattr(self._client, 'set_proxy'):
+                self._client.set_proxy(proxy_url)
+            logger.info('proxy_rotated', host=host)
+
+    async def _live_fill(self, token_id: str, side: str, px: float, size: float) -> Result:
         if self._client is None:
             return Result(False, error='live_client_unavailable')
-        logger.info('live_order_placeholder', price=px)
-        await asyncio.sleep(0.05)
-        return Result(True, px, True, f'live-{int(time.time() * 1000)}')
+        maker_timeout = float(config.get('trading.maker_timeout_seconds', 3))
+        max_retries = int(config.get('trading.max_proxy_retries', 10))
+
+        for attempt in range(max_retries + 1):
+            try:
+                order_args = {
+                    'token_id': token_id,
+                    'price': px,
+                    'size': size,
+                    'side': side,
+                }
+                limit_resp = self._client.create_and_post_order(order_args)
+                order_id = str(limit_resp.get('orderID', limit_resp.get('id', '')))
+
+                filled = False
+                deadline = time.time() + maker_timeout
+                while time.time() < deadline:
+                    await asyncio.sleep(0.25)
+                    try:
+                        status = self._client.get_order(order_id)
+                        if status.get('status') in ('MATCHED', 'FILLED'):
+                            filled = True
+                            fill_px = float(status.get('price', px))
+                            return Result(True, fill_px, True, order_id)
+                    except Exception:
+                        pass
+
+                if not filled:
+                    try:
+                        self._client.cancel(order_id)
+                    except Exception:
+                        pass
+                    market_args = {**order_args, 'order_type': 'FOK'}
+                    market_resp = self._client.create_and_post_order(market_args)
+                    market_id = str(market_resp.get('orderID', market_resp.get('id', '')))
+                    return Result(True, px, False, market_id)
+
+            except Exception as exc:
+                err = str(exc).lower()
+                if ('cloudflare' in err or '403' in err) and attempt < max_retries:
+                    logger.warning('cloudflare_block_retrying', attempt=attempt + 1, max=max_retries)
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    self._rotate_proxy()
+                    continue
+                return Result(False, error=f'live_order_failed: {exc}')
+
+        return Result(False, error='max_proxy_retries_exceeded')
 
     async def enter_trade(self, opp: dict) -> Result:
         ok, reason = await validator.validate(opp)
@@ -60,10 +116,14 @@ class Executor:
             return Result(False, error=reason)
 
         bet = max(self.min_bet, float(opp.get('bet_size', 1.0)))
+        entry_px = float(opp.get('entry_price', 0.5))
         if self.paper:
-            r = await self._paper_fill(float(opp.get('entry_price', 0.5)))
+            r = await self._paper_fill(entry_px)
         else:
-            r = await self._live_fill(float(opp.get('entry_price', 0.5)))
+            token_id = str(opp.get('token_id', ''))
+            side = 'BUY'
+            size = round(bet / max(entry_px, 1e-9), 6)
+            r = await self._live_fill(token_id, side, entry_px, size)
 
         if not r.success:
             await bus.publish('ORDER_FAILED', {'stage': 'entry', 'asset': opp.get('asset'), 'error': r.error})
@@ -84,10 +144,14 @@ class Executor:
         return r
 
     async def exit_trade(self, req: dict) -> Result:
+        exit_px = float(req.get('exit_price', 0.5))
         if self.paper:
-            r = await self._paper_fill(float(req.get('exit_price', 0.5)))
+            r = await self._paper_fill(exit_px)
         else:
-            r = await self._live_fill(float(req.get('exit_price', 0.5)))
+            token_id = str(req.get('token_id', ''))
+            side = 'SELL'
+            shares = float(req.get('shares', 0.0))
+            r = await self._live_fill(token_id, side, exit_px, shares)
 
         if not r.success:
             await bus.publish('ORDER_FAILED', {'stage': 'exit', 'asset': req.get('asset'), 'error': r.error})

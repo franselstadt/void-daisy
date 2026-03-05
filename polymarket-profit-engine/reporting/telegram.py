@@ -222,7 +222,7 @@ class TelegramReporter:
         if not self._authorized(update):
             return
         from core.config import config
-        version = config.get('version', 1)
+        version = config.get('version', default=1)
         await update.message.reply_text(f"⚙️ Config version: {version}")
 
     async def cmd_rollback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -206,8 +206,10 @@ async def on_poly_tick(event: dict) -> None:
         })
 
 
+bus.subscribe('POLYMARKET_TICK', on_poly_tick)
+
+
 async def run_profit_taker() -> None:
-    bus.subscribe('POLYMARKET_TICK', on_poly_tick)
     import asyncio
     while True:
         await asyncio.sleep(3600)
