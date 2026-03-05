@@ -7,7 +7,6 @@ import json
 from math import sqrt
 from pathlib import Path
 
-from core.event_bus import bus
 from core.state import state
 
 
@@ -79,7 +78,6 @@ class L1Bayesian:
             weights_path.write_text(json.dumps(weights, indent=2, sort_keys=True))
 
     async def run(self) -> None:
-        bus.subscribe('TRADE_EXITED', self.on_exit)
         while True:
             self._save()
             self._maybe_update_weights()

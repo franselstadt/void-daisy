@@ -8,7 +8,6 @@ import math
 from pathlib import Path
 
 from core.config import config
-from core.event_bus import bus
 from core.state import state
 
 
@@ -44,7 +43,6 @@ class L6Correlation:
             self.lags[asset] = 0.9 * self.lags[asset]
 
     async def run(self) -> None:
-        bus.subscribe('TRADE_EXITED', self.on_trade_exit)
         halflife_hours = float(config.get('learning', 'l6_halflife_hours', default=4))
         halflife = halflife_hours * 3600
         interval = 60

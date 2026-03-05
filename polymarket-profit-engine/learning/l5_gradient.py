@@ -24,9 +24,8 @@ class L5Gradient:
         self.trades.append(event)
 
     async def run(self) -> None:
-        bus.subscribe('TRADE_EXITED', self.on_exit)
         while True:
-            await asyncio.sleep(900)
+            await asyncio.sleep(300)
             if len(self.trades) < 10:
                 continue
             try:

@@ -8,7 +8,6 @@ import math
 from pathlib import Path
 
 from core.config import config
-from core.event_bus import bus
 from core.state import state
 
 
@@ -44,7 +43,6 @@ class L4Bandit:
         arm['total_reward'] += reward
 
     async def run(self) -> None:
-        bus.subscribe('TRADE_EXITED', self.on_trade_exit)
         while True:
             total_pulls = sum(a.get('pulls', 0) for a in self.data.values())
             if total_pulls == 0:
