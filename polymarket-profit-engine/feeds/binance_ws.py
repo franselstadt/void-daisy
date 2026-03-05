@@ -3,23 +3,65 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from collections import deque
 from dataclasses import dataclass, field
 
+import ujson
 import websockets
 
 from core.event_bus import bus
 from core.logger import logger
 from core.state import state
 
-STREAMS = {
-    "BTC": "wss://stream.binance.com:9443/ws/btcusdt@trade",
-    "ETH": "wss://stream.binance.com:9443/ws/ethusdt@trade",
-    "SOL": "wss://stream.binance.com:9443/ws/solusdt@trade",
-    "XRP": "wss://stream.binance.com:9443/ws/xrpusdt@trade",
+WS_URL = 'wss://stream.binance.com:9443/ws'
+
+ASSETS = {
+    'BTC': 'btcusdt@trade',
+    'ETH': 'ethusdt@trade',
+    'SOL': 'solusdt@trade',
+    'XRP': 'xrpusdt@trade',
 }
+
+
+@dataclass
+class _KalmanL2:
+    """2-state (position, velocity) Kalman filter."""
+
+    x0: float = 0.0
+    x1: float = 0.0
+    p00: float = 1000.0
+    p01: float = 0.0
+    p10: float = 0.0
+    p11: float = 1000.0
+    q: float = 0.1
+    r: float = 0.01
+    _init: bool = False
+
+    def update(self, z: float, dt: float) -> tuple[float, float]:
+        if not self._init:
+            self.x0 = z
+            self._init = True
+            return self.x0, self.x1
+        dt = max(dt, 1e-6)
+        xp0 = self.x0 + self.x1 * dt
+        xp1 = self.x1
+        q = self.q
+        pp00 = self.p00 + dt * (self.p10 + self.p01) + dt * dt * self.p11 + q * dt ** 4 / 4
+        pp01 = self.p01 + dt * self.p11 + q * dt ** 3 / 2
+        pp10 = self.p10 + dt * self.p11 + q * dt ** 3 / 2
+        pp11 = self.p11 + q * dt * dt
+        s = pp00 + self.r
+        k0 = pp00 / s
+        k1 = pp10 / s
+        y = z - xp0
+        self.x0 = xp0 + k0 * y
+        self.x1 = xp1 + k1 * y
+        self.p00 = (1 - k0) * pp00
+        self.p01 = (1 - k0) * pp01
+        self.p10 = pp10 - k1 * pp00
+        self.p11 = pp11 - k1 * pp01
+        return self.x0, self.x1
 
 
 @dataclass
@@ -32,8 +74,12 @@ class AssetBuffer:
     _vwap_pv: float = 0.0
     _vwap_v: float = 0.0
     _vwap_count: int = 0
+    _kalman: _KalmanL2 = field(default_factory=_KalmanL2)
+    _last_ts: float = 0.0
 
-    def add(self, price: float, volume: float, ts: float, side: str) -> None:
+    def push(self, price: float, volume: float, ts: float, side: str) -> None:
+        dt = ts - self._last_ts if self._last_ts else 0.0
+        self._last_ts = ts
         self.prices.append(price)
         self.volumes.append(volume)
         self.timestamps.append(ts)
@@ -44,6 +90,66 @@ class AssetBuffer:
         if self._vwap_count % 10000 == 0:
             self._vwap_pv = price * volume
             self._vwap_v = volume
+        self._kalman.update(price, dt)
+
+    # -- public API matching spec -----------------------------------------
+
+    def vel(self, secs: float) -> float:
+        if len(self.prices) < 2 or not self.timestamps:
+            return 0.0
+        p_ago = self._price_ago(secs)
+        return (self.prices[-1] - p_ago) / secs if p_ago else 0.0
+
+    def vol_ratio(self, short: float, long: float) -> float:
+        vs = self._avg_vol(short)
+        vl = self._avg_vol(long)
+        return vs / vl if vl else 1.0
+
+    def buy_pct(self, secs: float = 30) -> float:
+        if not self.timestamps:
+            return 0.5
+        cutoff = self.timestamps[-1] - secs
+        matched = [s for s, t in zip(self.sides, self.timestamps) if t >= cutoff]
+        if not matched:
+            return 0.5
+        return sum(1 for s in matched if s == 'BUY') / len(matched)
+
+    def rsi(self, period: int = 14) -> float:
+        if len(self.prices) < period + 1:
+            return 50.0
+        gains = 0.0
+        losses = 0.0
+        for i in range(-period, 0):
+            d = self.prices[i] - self.prices[i - 1]
+            if d > 0:
+                gains += d
+            else:
+                losses += abs(d)
+        ag = gains / period
+        al = losses / period if losses else 1e-9
+        rs = ag / al
+        return 100 - (100 / (1 + rs))
+
+    def vwap(self) -> float:
+        if self._vwap_v <= 0:
+            return self.prices[-1] if self.prices else 0.0
+        return self._vwap_pv / self._vwap_v
+
+    def consec(self) -> int:
+        if len(self.prices) < 2:
+            return 0
+        px = list(self.prices)[-50:]
+        direction = 1 if px[-1] > px[-2] else -1
+        count = 0
+        for i in range(len(px) - 1, 0, -1):
+            d = 1 if px[i] > px[i - 1] else -1
+            if d == direction:
+                count += direction
+            else:
+                break
+        return count
+
+    # -- internal helpers -------------------------------------------------
 
     def _price_ago(self, secs: float) -> float:
         if not self.timestamps:
@@ -61,79 +167,23 @@ class AssetBuffer:
         vals = [v for v, t in zip(self.volumes, self.timestamps) if t >= cutoff]
         return sum(vals) / len(vals) if vals else 0.0
 
-    def _rsi_14(self) -> float:
-        if len(self.prices) < 15:
-            return 50.0
-        gains = 0.0
-        losses = 0.0
-        for i in range(-14, 0):
-            d = self.prices[i] - self.prices[i - 1]
-            if d > 0:
-                gains += d
-            else:
-                losses += abs(d)
-        ag = gains / 14
-        al = losses / 14 if losses else 1e-9
-        rs = ag / al
-        return 100 - (100 / (1 + rs))
-
-    def _buy_pct(self, secs: float = 30) -> float:
-        if not self.timestamps:
-            return 0.5
-        cutoff = self.timestamps[-1] - secs
-        sides = [s for s, t in zip(self.sides, self.timestamps) if t >= cutoff]
-        if not sides:
-            return 0.5
-        return sum(1 for s in sides if s == 'BUY') / len(sides)
-
-    def _vwap(self, secs: float = 1800) -> float:
-        if not self.timestamps:
-            return 0.0
-        cutoff = self.timestamps[-1] - secs
-        pv = [(p * v, v) for p, v, t in zip(self.prices, self.volumes, self.timestamps) if t >= cutoff]
-        tv = sum(v for _, v in pv)
-        if tv <= 0:
-            return self.prices[-1]
-        return sum(x for x, _ in pv) / tv
-
-    def _consecutive(self) -> int:
-        if len(self.prices) < 2:
-            return 0
-        px = list(self.prices)[-50:]
-        direction = 1 if px[-1] > px[-2] else -1
-        count = 0
-        for i in range(len(px) - 1, 0, -1):
-            d = 1 if px[i] > px[i - 1] else -1
-            if d == direction:
-                count += direction
-            else:
-                break
-        return count
-
     def metrics(self) -> dict[str, float]:
         if len(self.prices) < 3:
             return {
                 'velocity_10s': 0.0, 'velocity_30s': 0.0, 'velocity_60s': 0.0, 'velocity_300s': 0.0,
                 'acceleration': 0.0, 'jerk': 0.0, 'volume_ratio_10_60': 1.0, 'volume_ratio_60_300': 1.0,
                 'buy_volume_pct': 0.5, 'rsi_14': 50.0, 'vwap_deviation': 0.0, 'consecutive_direction': 0,
-                'pct_change_60s': 0.0,
+                'pct_change_60s': 0.0, 'kalman_price': 0.0, 'kalman_velocity': 0.0,
             }
         p = self.prices[-1]
-        p10 = self._price_ago(10)
-        p30 = self._price_ago(30)
-        p60 = self._price_ago(60)
-        p300 = self._price_ago(300)
-        v10 = (p - p10) / 10 if p10 else 0.0
-        v30 = (p - p30) / 30 if p30 else 0.0
-        v60 = (p - p60) / 60 if p60 else 0.0
-        v300 = (p - p300) / 300 if p300 else 0.0
+        v10 = self.vel(10)
+        v30 = self.vel(30)
+        v60 = self.vel(60)
+        v300 = self.vel(300)
         accel = v10 - v30
         self.accelerations.append(accel)
         jerk = accel - self.accelerations[-6] if len(self.accelerations) > 6 else 0.0
-        vol10 = self._avg_vol(10)
-        vol60 = self._avg_vol(60)
-        vol300 = self._avg_vol(300)
-        vwap = self._vwap(1800)
+        vw = self.vwap()
         return {
             'velocity_10s': v10,
             'velocity_30s': v30,
@@ -141,21 +191,24 @@ class AssetBuffer:
             'velocity_300s': v300,
             'acceleration': accel,
             'jerk': jerk,
-            'volume_ratio_10_60': vol10 / vol60 if vol60 else 1.0,
-            'volume_ratio_60_300': vol60 / vol300 if vol300 else 1.0,
-            'buy_volume_pct': self._buy_pct(30),
-            'rsi_14': self._rsi_14(),
-            'vwap_deviation': ((p - vwap) / vwap) if vwap else 0.0,
-            'consecutive_direction': self._consecutive(),
-            'pct_change_60s': ((p - p60) / p60) if p60 else 0.0,
+            'volume_ratio_10_60': self.vol_ratio(10, 60),
+            'volume_ratio_60_300': self.vol_ratio(60, 300),
+            'buy_volume_pct': self.buy_pct(30),
+            'rsi_14': self.rsi(14),
+            'vwap_deviation': ((p - vw) / vw) if vw else 0.0,
+            'consecutive_direction': self.consec(),
+            'pct_change_60s': (v60 * 60 / p) if p else 0.0,
+            'kalman_price': self._kalman.x0,
+            'kalman_velocity': self._kalman.x1,
         }
 
 
 class BinanceFeed:
     def __init__(self) -> None:
-        self.buffers = {a: AssetBuffer() for a in STREAMS}
+        self.buffers = {a: AssetBuffer() for a in ASSETS}
 
-    async def _run_asset(self, asset: str, url: str) -> None:
+    async def _run_asset(self, asset: str, stream: str) -> None:
+        url = f'{WS_URL}/{stream}'
         backoff = 0.1
         while True:
             try:
@@ -165,14 +218,14 @@ class BinanceFeed:
                     await bus.publish('FEED_RECONNECTED', {'feed': 'binance', 'asset': asset})
                     backoff = 0.1
                     async for raw in ws:
-                        data = json.loads(raw)
+                        data = ujson.loads(raw)
                         px = float(data.get('p', 0.0))
                         vol = float(data.get('q', 0.0))
                         ts = float(data.get('T', int(time.time() * 1000))) / 1000
                         side = 'SELL' if data.get('m', False) else 'BUY'
 
                         buf = self.buffers[asset]
-                        buf.add(px, vol, ts, side)
+                        buf.push(px, vol, ts, side)
                         m = buf.metrics()
 
                         await state.set(f'price.{asset}.price', px)
@@ -198,7 +251,7 @@ class BinanceFeed:
                 backoff = min(backoff * 2, 5.0)
 
     async def run(self) -> None:
-        await asyncio.gather(*[self._run_asset(a, u) for a, u in STREAMS.items()])
+        await asyncio.gather(*[self._run_asset(a, s) for a, s in ASSETS.items()])
 
 
 async def start_binance_feeds() -> None:

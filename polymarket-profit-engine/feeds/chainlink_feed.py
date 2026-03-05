@@ -67,6 +67,7 @@ async def start_chainlink_feed() -> None:
                         oracle_price, updated = await _fetch_price(sess, asset)
                         spot = float(state.get(f'price.{asset}.price', 0.0))
                         if oracle_price <= 0 or spot <= 0:
+                            await state.set(f'oracle.{asset}.lag_seconds', 0)
                             continue
                         lag = max(0.0, time.time() - updated)
                         delta = (spot - oracle_price) / oracle_price
